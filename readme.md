@@ -1,133 +1,108 @@
-# 引き継ぎメモ
-> **このファイルは Claude Code への引き継ぎ用です。作業完了後に削除してください。**
+# Robot S3RCam
 
----
+AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロボット。
 
-## 現在地
+## 構成
 
-STEP2 実装済み・動作確認中。  
-ペアリングと制御パケット受信がまだ未確認。
+| ロール | ボード | ビルドターゲット |
+|--------|--------|----------------|
+| ロボット（映像送信・サーボ駆動） | AtomS3R-CAM | `atoms3r-robot` |
+| コントローラ（LCD表示・操作入力） | AtomS3R | `atoms3r-ctrlr` |
 
----
+## ピン配置
 
-## ファイル構成
+### atoms3r-robot
 
-```
-src/main.cpp        共通ソース (ROLE_ROBOT / ROLE_CTRLR で分岐)
-platformio.ini
-```
+| ピン | 用途 |
+|------|------|
+| G5 / LEDC CH1 | サーボ1（左） |
+| G6 / LEDC CH2 | サーボ2（右） |
+| G7 / LEDC CH3 | サーボ3（アーム） |
 
-### 書き込みコマンド
+### atoms3r-ctrlr
 
-```bash
-pio run -e atoms3r-robot  --target upload   # AtomS3R-CAM
-pio run -e atoms3r-ctrlr  --target upload   # AtomS3R
-```
+| ピン | 用途 |
+|------|------|
+| G8 | 可変抵抗 H軸（アナログ） |
+| G7 | 可変抵抗 V軸（アナログ） |
+| G5 | TRG（トリガー）ボタン |
+| G38 | OK ボタン |
+| G39 | NG ボタン |
 
----
+## ボタン操作（コントローラ側）
 
-## ハードウェア
+| 操作 | 機能 |
+|------|------|
+| Aボタン ダブルクリック | L/Rモード切替（SPIFFS保存） |
+| Aボタン 長押し | ペアリング（ENQ送信） |
+| TRGボタン 押下中 | アーム → 角度C（-10°） |
+| OKボタン 1回 | アーム規定位置 A（-70°）↔B（-55°）トグル |
+| NGボタン 1回 | アーム NG（+70°）保持トグル（2回目でA/Bへ戻る） |
 
-| env | 機種 | 役割 |
-|-----|------|------|
-| `atoms3r-robot` | AtomS3R-CAM (8MB PSRAM) | 映像送信・サーボ駆動 |
-| `atoms3r-ctrlr` | AtomS3R | 映像表示・可変抵抗・制御送信 |
+## L/R モード
 
-### ピン配置
+Aボタンダブルクリックで切替。`/param.ini` に保存される。
 
-| 側 | 信号 | GPIO |
-|----|------|------|
-| ctrlr | 可変抵抗 H軸 | G8 |
-| ctrlr | 可変抵抗 V軸 | G7 |
-| robot | サーボ1 | G5 (LEDC_TIMER_1 / CH_1) |
-| robot | サーボ2 | G6 (LEDC_TIMER_1 / CH_2) |
-| robot | カメラ電源 | G18 (Low=ON) |
+- **Rモード（デフォルト）**: 通常向き
+- **Lモード**: LCD・映像・ジョイスティック入力を180°反転
 
-カメラが `LEDC_TIMER_0 / CH_0` を占有するため、サーボは `TIMER_1` 以降を使用。
+## アーム制御
 
----
+サーボ3（G7）で駆動するアームの角度定義：
 
-## 通信設計
+| 位置 | 角度 |
+|------|------|
+| A（デフォルト） | -70° |
+| B（OKトグル後） | -55° |
+| C（TRG押下中） | -10° |
+| NG（NGトグル） | +70° |
 
-すべてのパケットを `radio.sendData()` / `setRecvCallback()` 経由で送受信。  
-`esp_now_register_recv_cb` は**使わない**（ESPNowCam のコールバックを上書きしてしまうため）。
+タイムアウト・通信切断時は全サーボ0°へゆっくり移動（約90°/秒）。
 
-映像とパケットの識別は先頭バイトで行う。
+## ステータス表示
 
-| 識別 | 条件 | 方向 | サイズ |
-|------|------|------|--------|
-| 映像 | 先頭 `0xFF 0xD8` (JPEG) | robot → ctrlr | 可変 |
-| `sin1` | 制御パケット | ctrlr → robot | 7 byte |
-| `senq` | ペアリング要求 + 自MAC | ctrlr → robot | 10 byte |
-| `sack` | ペアリング応答 + 自MAC | robot → ctrlr | 10 byte |
-| `smac` | 疎通確認 ping + 自MAC | ctrlr → robot | 10 byte |
-| `spon` | 疎通確認 pong + 自MAC | robot → ctrlr | 10 byte |
+LCD最下部の1行（黒帯・白文字）にリアルタイムで状態を表示。
 
-制御パケット構造 (`sin1`):
-```
-[s][i][n][1][左モーター+90][右モーター+90][ボタンフラグ]
-```
+| メッセージ | 状態 |
+|-----------|------|
+| `PAIRED` | 起動時ペアリング済み |
+| `NO PAIR  Hold A:pair` | ペアリングなし（ブロードキャストモード） |
+| `PAIR FAIL` | ペアリングタイムアウト |
+| `ON AIR P2P` | 映像受信中（P2Pペアリング済み） |
+| `ON AIR BCAST` | 映像受信中（ブロードキャストモード） |
+| `NO SIGNAL` | 映像途絶（2秒以上フレームなし） |
 
----
+## パケット仕様
 
-## MAC 履歴管理 (ctrlr 側)
+先頭4バイトの識別子で振り分け。映像フレームは JPEG ヘッダ（`0xFF 0xD8`）で識別。
 
-- SPIFFS `/mac.txt` : 最大5件 × 6byte バイナリリスト
-- 起動時に `smac` ping → `spon` pong で疎通確認
-- 応答した MAC を先頭に移動して使用
-- 全件無応答 → `/mac.txt` 削除 → ブロードキャストにフォールバック
-- ペアリング時は新 MAC を先頭追加 (6件超で末尾を捨てる)
+| 識別子 | サイズ | 方向 | 内容 |
+|--------|--------|------|------|
+| `sin1` | 7 byte | ctrlr → robot | 制御パケット `[L+90][R+90][btn]` |
+| `senq` | 10 byte | ctrlr → robot | ペアリング要求（自MAC付き） |
+| `sack` | 10 byte | robot → ctrlr | ペアリング応答（自MAC付き） |
+| `spin` | 10 byte | ctrlr → robot | 疎通確認 ping |
+| `spon` | 10 byte | robot → ctrlr | 疎通確認 pong |
 
----
+### 制御パケット Byte6（btnフラグ）
 
-## ペアリング手順
+| Bit | 意味 |
+|-----|------|
+| 0 | BtnA |
+| 1 | OK ボタン |
+| 2 | NG ボタン |
+| 4 | TRG（トリガー）ボタン |
 
-1. 両機種を起動
-2. ctrlr の **Aボタン長押し** → ENQ 送信
+## MAC履歴・ペアリング手順
+
+1. 両機を起動
+2. ctrlr の Aボタン長押し → ENQ 送信
 3. robot が ACK を返す
-4. ctrlr が ACK 受信 → MAC 保存 → 自動再起動
+4. ctrlr が ACK 受信 → `/mac.txt` に保存 → 自動再起動
 
----
+起動時に `/mac.txt` の履歴MACへ ping → 応答したMACを先頭に移動して P2P通信。全件無応答時はブロードキャストにフォールバック。
 
-## ADC・制御パラメータ
+## 依存ライブラリ
 
-| 定数 | 値 | 意味 |
-|------|----|------|
-| `CTRL_INTERVAL_US` | 20,000 (20ms) | 制御パケット送信間隔 |
-| `LOG_SIZE` | 5 | 移動平均サンプル数 |
-| `DEADBAND` | 0.1 | 不感帯 (±10%) |
-| `MAX_SPEED` | 60 | 最大サーボ角度 |
-| `RECV_TIMEOUT_MS` | 300 | 無受信でサーボ停止するまでの時間 |
-| `PING_TIMEOUT_MS` | 800 | 疎通確認タイムアウト |
-
-タンクデフ演算 (joy_v は前後反転済み):
-```cpp
-left  = -(MAX_SPEED * (-joy_v - joy_h))
-right =   MAX_SPEED * (-joy_v + joy_h)
-```
-
----
-
-## STEP3 残タスク
-
-- [ ] ペアリング・制御パケット受信の動作確認
-- [ ] モード切替 (Aボタンダブルクリック) + SPIFFS 保存
-- [ ] サーボキャリブレーション (センター・スパン調整)
-- [ ] 仕様書 `firmware_specification.md` の残機能を確認して取捨選択
-
----
-
-## 既知の問題・注意点
-
-- `Using old EspNow implementation :(` はライブラリの警告で動作には影響しない
-- ESPNowCam の `setRecvCallback` は**フレーム完成時**に呼ばれる。短いパケットも同じコールバックで届く（タンクサンプルと同じ設計）
-- WiFi 使用中は ADC2 系ピンが使えない。ctrlr の可変抵抗は ADC1 系の G7/G8 を使用
-- SPIFFS は `SPIFFS.begin(true)` でフォーマットを自動実行している
-
----
-
-## 参考リンク
-
-- [ESPNowCam タンクサンプル](https://deepwiki.com/hpsaturn/ESPNowCam/4.1-tank-control-system)
-- [AtomS3R-CAM ドキュメント](https://docs.m5stack.com/en/core/AtomS3R%20Cam)
-- [AtomS3R ドキュメント](https://docs.m5stack.com/en/core/AtomS3R)
+- [M5Unified](https://github.com/m5stack/M5Unified) `^0.2.2`
+- [EspNowCam](https://github.com/hpsaturn/esp32-camera) `^0.2.1`

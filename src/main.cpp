@@ -71,7 +71,7 @@ static constexpr int     PING_TIMEOUT_MS  = 800;
 static constexpr uint8_t ID_CTRL[4] = {'s','i','n','1'};
 static constexpr uint8_t ID_ENQ[4]  = {'s','e','n','q'};
 static constexpr uint8_t ID_ACK[4]  = {'s','a','c','k'};
-static constexpr uint8_t ID_PING[4] = {'s','m','a','c'};
+static constexpr uint8_t ID_PING[4] = {'s','p','i','n'};
 static constexpr uint8_t ID_PONG[4] = {'s','p','o','n'};
 
 static constexpr int PKT_MAC_LEN  = 10;
@@ -123,12 +123,18 @@ static constexpr int CAM_PIN_Y2    = 3;
 // サーボ (LEDC_TIMER_1: カメラが TIMER_0 を占有)
 static constexpr int SERVO_PIN1  = 5;
 static constexpr int SERVO_PIN2  = 6;
+static constexpr int SERVO_PIN3  = 7;
 static constexpr int LEDC_CH_SV1 = 1;
 static constexpr int LEDC_CH_SV2 = 2;
+static constexpr int LEDC_CH_SV3 = 3;
 static constexpr int SERVO_FREQ  = 50;
 static constexpr int SERVO_BITS  = 10;
 static constexpr int SERVO_MIN_W = 26;
 static constexpr int SERVO_MAX_W = 125;
+static constexpr int ARM_ANGLE_A  = -70;
+static constexpr int ARM_ANGLE_B  = -55;
+static constexpr int ARM_ANGLE_C  = -10;
+static constexpr int ARM_ANGLE_NG =  70;
 
 ESPNowCam radio;
 
@@ -139,6 +145,19 @@ static volatile int           sv_left      = 0;
 static volatile int           sv_right     = 0;
 static volatile uint8_t       sv_btn       = 0;
 static volatile unsigned long last_recv_ms = 0;
+
+// アーム状態 (servo3)
+static bool sv_arm_mode_b = false;
+static bool sv_ng_hold    = false;
+static bool ok_prev       = false;
+static bool ng_prev       = false;
+
+// サーボ出力バッファ (タイムアウト時イージング用)
+static int            sv_out_left  = 0;
+static int            sv_out_right = 0;
+static int            sv_out_arm   = 0;
+static unsigned long  ease_last_ms = 0;
+static constexpr int  EASE_DEG_PER_SEC = 90;
 
 // recv コールバック内から esp_now_send は禁止 (ESP-IDF 5.x)
 // ACK/PONG はメインループで送信するための defer バッファ
@@ -153,12 +172,25 @@ static void initServo() {
     pinMode(SERVO_PIN2, OUTPUT);
     ledcSetup(LEDC_CH_SV2, SERVO_FREQ, SERVO_BITS);
     ledcAttachPin(SERVO_PIN2, LEDC_CH_SV2);
-    Serial.println("[SERVO] init OK  G5/CH1  G6/CH2");
+    pinMode(SERVO_PIN3, OUTPUT);
+    ledcSetup(LEDC_CH_SV3, SERVO_FREQ, SERVO_BITS);
+    ledcAttachPin(SERVO_PIN3, LEDC_CH_SV3);
+    Serial.println("[SERVO] init OK  G5/CH1  G6/CH2  G7/CH3");
 }
 
 static void setServo(int d1, int d2) {
     ledcWrite(LEDC_CH_SV1, map(d1, -90, 90, SERVO_MIN_W, SERVO_MAX_W));
     ledcWrite(LEDC_CH_SV2, map(d2, -90, 90, SERVO_MIN_W, SERVO_MAX_W));
+}
+
+static void setArm(int deg) {
+    ledcWrite(LEDC_CH_SV3, map(deg, -90, 90, SERVO_MIN_W, SERVO_MAX_W));
+}
+
+static int easeToward(int cur, int target, int step) {
+    if (cur < target) return min(cur + step, target);
+    if (cur > target) return max(cur - step, target);
+    return cur;
 }
 
 // --- ESPNowCam 受信コールバック ---
@@ -249,6 +281,7 @@ void setup() {
 
     initServo();
     setServo(0, 0);
+    setArm(0);
 
     // ESPNowCam 初期化
     radio.setRecvBuffer(recvBuf);
@@ -288,8 +321,42 @@ void loop() {
     }
 
     bool recent = (millis() - last_recv_ms) < (unsigned long)RECV_TIMEOUT_MS;
-    setServo(recent ? sv_left  : 0,
-             recent ? sv_right : 0);
+
+    // アーム状態マシン
+    bool cur_ok  = recent && ((sv_btn >> 1) & 1);
+    bool cur_ng  = recent && ((sv_btn >> 2) & 1);
+    bool cur_trg = recent && ((sv_btn >> 4) & 1);
+
+    if (cur_ok && !ok_prev) { sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
+    ok_prev = cur_ok;
+    if (cur_ng && !ng_prev) sv_ng_hold = !sv_ng_hold;
+    ng_prev = cur_ng;
+
+    int arm_target;
+    if (!recent)         arm_target = 0;
+    else if (cur_trg)    arm_target = ARM_ANGLE_C;
+    else if (sv_ng_hold) arm_target = ARM_ANGLE_NG;
+    else                 arm_target = sv_arm_mode_b ? ARM_ANGLE_B : ARM_ANGLE_A;
+
+    if (recent) {
+        // 通常制御: スナップ
+        sv_out_left  = sv_left;
+        sv_out_right = sv_right;
+        sv_out_arm   = arm_target;
+        ease_last_ms = millis();
+    } else {
+        // タイムアウト: 0° へゆっくりイージング
+        unsigned long now     = millis();
+        unsigned long elapsed = now - ease_last_ms;
+        if (elapsed > 500) elapsed = 500;
+        int step = max(1, (int)((long)EASE_DEG_PER_SEC * (long)elapsed / 1000));
+        ease_last_ms = now;
+        sv_out_left  = easeToward(sv_out_left,  0, step);
+        sv_out_right = easeToward(sv_out_right, 0, step);
+        sv_out_arm   = easeToward(sv_out_arm,   0, step);
+    }
+    setServo(sv_out_left, sv_out_right);
+    setArm(sv_out_arm);
 
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
@@ -317,12 +384,18 @@ static constexpr int LCD_W = 128;
 static constexpr int LCD_H = 128;
 
 static uint8_t           recvBuf[64 * 1024];
-static volatile bool     frameReady = false;
-static volatile uint32_t frameLen   = 0;
+static volatile bool          frameReady    = false;
+static volatile uint32_t      frameLen      = 0;
+static volatile unsigned long last_frame_ms = 0;
+static bool                   was_live      = false;
+static constexpr unsigned long FRAME_TIMEOUT_MS = 2000;
 
-// ADC
-static constexpr int ADC_H_PIN = 8;
-static constexpr int ADC_V_PIN = 7;
+// ADC + ハードウェアボタン
+static constexpr int ADC_H_PIN  = 8;
+static constexpr int ADC_V_PIN  = 7;
+static constexpr int TRG_SW_PIN = 5;
+static constexpr int OK_SW_PIN  = 38;
+static constexpr int NG_SW_PIN  = 39;
 
 static float h_log[LOG_SIZE] = {};
 static float v_log[LOG_SIZE] = {};
@@ -414,8 +487,9 @@ static void onDataRecv(uint32_t length) {
 
     // 映像フレーム (JPEG ヘッダで識別)
     if (isJpeg(recvBuf)) {
-        frameLen   = length;
-        frameReady = true;
+        frameLen      = length;
+        frameReady    = true;
+        last_frame_ms = millis();
         return;
     }
 
@@ -433,6 +507,25 @@ static void onDataRecv(uint32_t length) {
         pong_received = true;
         return;
     }
+}
+
+// ----------------------------------------------------------------
+//  ステータス管理
+// ----------------------------------------------------------------
+static char last_status[32] = "";
+
+static void setStatus(const char* msg) {
+    strncpy(last_status, msg, sizeof(last_status) - 1);
+    last_status[sizeof(last_status) - 1] = '\0';
+}
+
+static void drawStatusBar() {
+    if (last_status[0] == '\0') return;
+    M5.Display.fillRect(0, LCD_H - 10, LCD_W, 10, TFT_BLACK);
+    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(2, LCD_H - 9);
+    M5.Display.print(last_status);
 }
 
 // ----------------------------------------------------------------
@@ -516,8 +609,14 @@ static void draw_matrix_str(const char* str, int delay_ms, uint32_t color, uint3
 
 static void showModeAnim() {
     M5.Display.fillScreen(TFT_BLACK);
-    // old_src: draw_matrix_str("L Controler ", MATRIX_CHAR_DELAY_MS_FAST, COLOR_WHITE, 0)
     draw_matrix_str(lr_reversed ? "L con " : "R con ", MX_DELAY_MS, MX_WHITE, 0);
+    if (last_status[0] != '\0') {
+        M5.Display.fillRect(0, LCD_H - 10, LCD_W, 10, TFT_BLACK);
+        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        M5.Display.setTextSize(1);
+        M5.Display.setCursor(2, LCD_H - 9);
+        M5.Display.print(last_status);
+    }
 }
 
 // ----------------------------------------------------------------
@@ -537,7 +636,11 @@ static void readADC() {
 static void sendCtrlPacket() {
     int left  = constrain(-(int)(MAX_SPEED * (-joy_v - joy_h)), -90, 90);
     int right = constrain( (int)(MAX_SPEED * (-joy_v + joy_h)), -90, 90);
-    uint8_t btn = M5.BtnA.isPressed() ? 0x01 : 0x00;
+    uint8_t btn = 0;
+    if (M5.BtnA.isPressed())          btn |= (1 << 0);
+    if (!digitalRead(OK_SW_PIN))      btn |= (1 << 1);
+    if (!digitalRead(NG_SW_PIN))      btn |= (1 << 2);
+    if (!digitalRead(TRG_SW_PIN))     btn |= (1 << 4);
     uint8_t pkt[PKT_CTRL_LEN] = {
         ID_CTRL[0], ID_CTRL[1], ID_CTRL[2], ID_CTRL[3],
         (uint8_t)(left  + SERVO_OFFSET),
@@ -636,6 +739,7 @@ static void doPairing() {
         delay(10);
     }
     Serial.println("[PAIR] timeout");
+    setStatus("PAIR FAIL");
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setTextColor(TFT_RED, TFT_BLACK);
     M5.Display.setCursor(2, 2);
@@ -655,13 +759,12 @@ void setup() {
     SPIFFS.begin(true);
 
     M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-    M5.Display.setTextSize(1);
-    M5.Display.setCursor(2, 2);
-    M5.Display.println("Starting...");
 
     pinMode(ADC_H_PIN, ANALOG);
     pinMode(ADC_V_PIN, ANALOG);
+    pinMode(TRG_SW_PIN, INPUT_PULLUP);
+    pinMode(OK_SW_PIN,  INPUT_PULLUP);
+    pinMode(NG_SW_PIN,  INPUT_PULLUP);
 
     // ESPNowCam 映像受信 + 制御応答受信
     radio.setRecvBuffer(recvBuf);
@@ -677,28 +780,16 @@ void setup() {
     // MAC リスト読み込み → 疎通確認
     loadMacList();
     if (macCount > 0) {
-        M5.Display.setCursor(2, 14);
-        M5.Display.println("Checking MAC...");
         is_paired = resolveMac();
     }
 
     if (is_paired) {
         Serial.println("[MAC] P2P mode");
-        M5.Display.fillScreen(TFT_BLACK);
-        M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-        M5.Display.setTextSize(1);
-        M5.Display.setCursor(2, 2);
-        M5.Display.println("PAIRED");
+        setStatus("PAIRED");
     } else {
-        // ブロードキャストのまま使用
         memcpy(target_addr, BROADCAST_ADDR, 6);
         Serial.println("[MAC] broadcast mode");
-        M5.Display.fillScreen(TFT_BLACK);
-        M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-        M5.Display.setTextSize(1);
-        M5.Display.setCursor(2, 2);
-        M5.Display.println("NO PAIR");
-        M5.Display.println("Hold A:pair");
+        setStatus("NO PAIR  Hold A:pair");
     }
 
     // 制御タイマー (20ms)
@@ -710,11 +801,22 @@ void setup() {
     esp_timer_start_periodic(t, CTRL_INTERVAL_US);
 
     Serial.println("Ready");
-    delay(800);
+    showModeAnim();
 }
 
 void loop() {
     M5.update();
+
+    // 映像タイムアウト監視 → ON AIR / NO SIGNAL 切替
+    bool is_live = (last_frame_ms != 0) &&
+                   ((millis() - last_frame_ms) < FRAME_TIMEOUT_MS);
+    if (is_live && !was_live) {
+        setStatus(is_paired ? "ON AIR P2P" : "ON AIR BCAST");
+    } else if (!is_live && was_live) {
+        setStatus("NO SIGNAL");
+        drawStatusBar();
+    }
+    was_live = is_live;
 
     // Aボタンダブルクリック → L/R モード切替 + /param.ini 保存
     if (M5.BtnA.wasDoubleClicked()) {
@@ -727,14 +829,16 @@ void loop() {
     // Aボタン長押し → ペアリング
     if (M5.BtnA.wasHold()) {
         doPairing();
+        showModeAnim();
     }
 
-    // 映像表示 (LCD全面 128×128)
+    // 映像表示 (LCD全面 128×128) + ステータスバー重ね描き
     if (frameReady) {
         frameReady = false;
         M5.Display.drawJpg(recvBuf, frameLen,
                            0, 0, LCD_W, LCD_H,
                            0, 0, JPEG_DIV_NONE);
+        drawStatusBar();
     }
 }
 
