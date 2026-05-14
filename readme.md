@@ -45,6 +45,11 @@ AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロ�
 
 共通設定（`[common]`）にプラットフォームバージョン・ライブラリ・PSRAM有効化フラグをまとめ、各ターゲットは `-DROLE_ROBOT` / `-DROLE_CTRLR` フラグで役割を切り替えます。
 
+## 依存ライブラリ
+
+- [M5Unified](https://github.com/m5stack/M5Unified) `^0.2.2`
+- [EspNowCam](https://github.com/hpsaturn/esp32-camera) `^0.2.1`
+
 ## ピン配置
 
 ### atoms3r-robot
@@ -137,8 +142,3 @@ LCD最下部の1行（黒帯・白文字）にリアルタイムで状態を表�
 4. ctrlr が ACK 受信 → `/mac.txt` に保存 → 自動再起動
 
 起動時に `/mac.txt` の履歴MACへ ping → 応答したMACを先頭に移動して P2P通信。全件無応答時はブロードキャストにフォールバック。
-
-## 依存ライブラリ
-
-- [M5Unified](https://github.com/m5stack/M5Unified) `^0.2.2`
-- [EspNowCam](https://github.com/hpsaturn/esp32-camera) `^0.2.1`
