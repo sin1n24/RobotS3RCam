@@ -4,10 +4,21 @@ AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロ�
 
 ## 構成
 
-| ロール | ボード | ビルドターゲット |
+### 必須部品（マイコン）
+| 名前 | 役割 | マイコン | ビルドターゲット |
+|--------|--------|--------|----------------|
+| ロボット | 映像送信・サーボ駆動 | AtomS3R-CAM | `atoms3r-robot` |
+| コントローラ | LCD表示・操作入力 | AtomS3R | `atoms3r-ctrlr` |
+
+### 部品表 (BOM)
+| 一般名 | 品名 | 参考価格 |
 |--------|--------|----------------|
-| ロボット（映像送信・サーボ駆動） | AtomS3R-CAM | `atoms3r-robot` |
-| コントローラ（LCD表示・操作入力） | AtomS3R | `atoms3r-ctrlr` |
+| カメラ付きマイコン | [AtomS3R-CAM](https://ssci.to/9916) | ¥3,630 |
+| サーボ接続基板 | [ATOM向 サーボ基板キット](https://ssci.to/11122) | ¥1,000 |
+| 液晶付きマイコン | [AtomS3R](https://ssci.to/9915) | ¥3,443 |
+| コントローラ | [小型コントローラ(キット)](https://ssci.to/9521) | ¥3,000 |
+| マイクロサーボ | [FS90](https://akizukidenshi.com/catalog/g/g114806/)/[FS90R](https://akizukidenshi.com/catalog/g/g113206/) | ¥500 |
+ロボットのメカ構造は非売品です。
 
 ## ピン配置
 
