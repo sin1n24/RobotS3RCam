@@ -43,8 +43,6 @@ AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロ�
 | `atoms3r-robot` | AtomS3R-CAM | `-DROLE_ROBOT` |
 | `atoms3r-ctrlr` | AtomS3R | `-DROLE_CTRLR` |
 
-共通設定（`[common]`）にプラットフォームバージョン・ライブラリ・PSRAM有効化フラグをまとめ、各ターゲットは `-DROLE_ROBOT` / `-DROLE_CTRLR` フラグで役割を切り替えます。
-
 ## 依存ライブラリ
 
 - [M5Unified](https://github.com/m5stack/M5Unified) `^0.2.2`
