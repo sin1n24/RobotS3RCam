@@ -2,8 +2,17 @@
 
 AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロボット。
 
-動画
-https://youtu.be/P5PM_GwRe_A
+[![動画サムネイル](https://img.youtube.com/vi/P5PM_GwRe_A/maxresdefault.jpg)](https://youtu.be/P5PM_GwRe_A)
+
+## 特徴 (Features)
+
+- **超小型FPVシステム**: [AtomS3R-CAM](https://ssci.to/9916) のカメラ映像を、手元のコントローラにリアルタイム表示。
+
+- **ESP-NOWによる低遅延通信**: Wi-Fiルーター不要で、起動してすぐにペアリング＆操作が可能。
+
+- **スマートな配線管理**: 狭いスペースにマイコンと複数のサーボを収めるため、専用の[サーボ接続基板](https://ssci.to/11122)を設計しました。はんだ付けや煩わしい配線なしで、スッキリとしたロボットを構築できます。
+
+- **専用コントローラキット**: 指先に収まる[小型コントローラ(キット)](https://ssci.to/9521)を使えば、ジョイスティックとボタンによる直感的な操作と、L/Rモード（画面・操作の180度反転）にも対応可能です。
 
 ## 構成
 
@@ -21,7 +30,20 @@ https://youtu.be/P5PM_GwRe_A
 | 液晶付きマイコン | [AtomS3R](https://ssci.to/9915) | ¥3,443 |
 | コントローラ | [小型コントローラ(キット)](https://ssci.to/9521) | ¥3,000 |
 | マイクロサーボ | [FS90](https://akizukidenshi.com/catalog/g/g114806/)/[FS90R](https://akizukidenshi.com/catalog/g/g113206/) | ¥500 |
-ロボットのメカ構造は非売品です。
+| 電源 | LiPoバッテリー / 乾電池ボックス（3.3〜5V対応） | 〜¥500 |
+
+ロボットのメカ構造はお好みに合わせて自作・カスタマイズできます。
+
+## 開発・ビルド環境
+
+[PlatformIO](https://platformio.org/) を使用しています。`platformio.ini` で2つのビルドターゲットを定義しており、同一のソースコードをフラグで切り替えてロボット／コントローラどちらにも書き込めます。
+
+| ターゲット | 書き込み先 | アップロードコマンド |
+|-----------|-----------|-------------------|
+| `atoms3r-robot` | AtomS3R-CAM | `pio run -e atoms3r-robot -t upload` |
+| `atoms3r-ctrlr` | AtomS3R | `pio run -e atoms3r-ctrlr -t upload` |
+
+共通設定（`[common]`）にプラットフォームバージョン・ライブラリ・PSRAM有効化フラグをまとめ、各ターゲットは `-DROLE_ROBOT` / `-DROLE_CTRLR` フラグで役割を切り替えます。
 
 ## ピン配置
 
