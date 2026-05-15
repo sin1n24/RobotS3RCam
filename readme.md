@@ -19,16 +19,9 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 ### システム構成
 | 名前 | 役割 | マイコン | 接続部品 |
 |--------|--------|--------|----------------|
-<<<<<<< HEAD
-| ロボット | 映像送信・サーボ駆動 | AtomS3R-CAM | `atoms3r-robot` |
-| コントローラ | LCD表示・操作入力 | AtomS3R | `atoms3r-ctrlr` |
-| コントローラ | LCD表示・操作入力 | AtomS3 | `atoms3-ctrlr` |
-
-> AtomS3R と AtomS3 はコントローラとして互換。AtomS3 は PSRAM なしのため、ビルドターゲットを `atoms3-ctrlr` に切り替えてください。
-=======
 | ロボット | 映像送信・サーボ駆動 | AtomS3R-CAM | マイクロサーボ×3 |
 | コントローラ | LCD表示・操作入力 | AtomS3R | ジョイスティック+ボタン×3 |
->>>>>>> 9b023f11bc85d2e16c02a50a15c3c1ac36760771
+| コントローラ | LCD表示・操作入力 | AtomS3 | ジョイスティック+ボタン×3 |
 
 ### 部品表 (BOM)
 | 一般名 | 品名 | 参考価格 |
@@ -45,24 +38,20 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 ## 開発・ビルド環境
 
 [PlatformIO](https://platformio.org/) を使用しています。`platformio.ini` で3つのビルドターゲットを定義しており、同一のソースコードをフラグで切り替えてロボット／コントローラどちらにも書き込めます。
+> AtomS3R と AtomS3 はコントローラとして互換ですが、AtomS3 は PSRAM なしのため、ビルドターゲットを `atoms3-ctrlr` に切り替えてください。
 
 | ターゲット | 書き込み先 | フラグ |
-|-----------|-----------|-------------------|
-<<<<<<< HEAD
-| `atoms3r-robot` | AtomS3R-CAM | `pio run -e atoms3r-robot -t upload` |
-| `atoms3r-ctrlr` | AtomS3R | `pio run -e atoms3r-ctrlr -t upload` |
-| `atoms3-ctrlr` | AtomS3 | `pio run -e atoms3-ctrlr -t upload` |
-
-共通設定（`[common]`）にプラットフォームバージョン・ライブラリをまとめ、PSRAM 関連フラグ（`qio_opi` / `-DBOARD_HAS_PSRAM`）は AtomS3R 系ターゲットのみに付与しています。各ターゲットは `-DROLE_ROBOT` / `-DROLE_CTRLR` フラグで役割を切り替えます。AtomS3 向けには `-DBOARD_ATOMS3` も追加されます。
-=======
+|-----------|-----------|--------|
 | `atoms3r-robot` | AtomS3R-CAM | `-DROLE_ROBOT` |
 | `atoms3r-ctrlr` | AtomS3R | `-DROLE_CTRLR` |
+| `atoms3-ctrlr` | AtomS3 | `-DROLE_CTRLR -DBOARD_ATOMS3` |
+
+共通設定（`[common]`）にプラットフォームバージョン・ライブラリをまとめ、PSRAM 関連フラグ（`qio_opi` / `-DBOARD_HAS_PSRAM`）は AtomS3R 系ターゲットのみに付与しています。
 
 ## 依存ライブラリ
 
 - [M5Unified](https://github.com/m5stack/M5Unified) `^0.2.2`
 - [EspNowCam](https://github.com/hpsaturn/esp32-camera) `^0.2.1`
->>>>>>> 9b023f11bc85d2e16c02a50a15c3c1ac36760771
 
 ## ピン配置
 
