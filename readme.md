@@ -20,17 +20,16 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 | 名前 | 役割 | マイコン | 接続部品 |
 |--------|--------|--------|----------------|
 | ロボット | 映像送信・サーボ駆動 | AtomS3R-CAM | マイクロサーボ×3 |
-| コントローラ | LCD表示・操作入力 | AtomS3R | ジョイスティック+ボタン×3 |
-| コントローラ | LCD表示・操作入力 | AtomS3 | ジョイスティック+ボタン×3 |
+| コントローラ | LCD表示・操作入力 | AtomS3R / S3 | ジョイスティック+ボタン×3 |
 
 ### 部品表 (BOM)
 | 一般名 | 品名 | 参考価格 |
 |--------|--------|----------------|
 | カメラ付きマイコン | [AtomS3R-CAM](https://ssci.to/9916) | ¥3,630 |
 | サーボ接続基板 | [ATOM向 サーボ基板キット](https://ssci.to/11122) | ¥1,000 |
-| 液晶付きマイコン | [AtomS3R](https://ssci.to/9915) または [AtomS3](https://ssci.to/9840) | ¥3,443 / ¥2,783 |
+| 液晶付きマイコン | [AtomS3R](https://ssci.to/9915) または [AtomS3](https://ssci.to/8670) | ¥3,443 / ¥3,014 |
 | コントローラ | [小型コントローラ(キット)](https://ssci.to/9521) | ¥3,000 |
-| マイクロサーボ | [FS90](https://akizukidenshi.com/catalog/g/g114806/)/[FS90R](https://akizukidenshi.com/catalog/g/g113206/) | ¥500 |
+| マイクロサーボ | [FS90](https://akizukidenshi.com/catalog/g/g114806/) / [FS90R](https://akizukidenshi.com/catalog/g/g113206/)など | ¥450～ |
 | 電源 | 乾電池 / LiPo / USBなど | ¥200～ |
 
 ロボットのメカ構造はお好みに合わせて自作・カスタマイズできます。
@@ -45,8 +44,6 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 | `atoms3r-robot` | AtomS3R-CAM | `-DROLE_ROBOT` |
 | `atoms3r-ctrlr` | AtomS3R | `-DROLE_CTRLR` |
 | `atoms3-ctrlr` | AtomS3 | `-DROLE_CTRLR -DBOARD_ATOMS3` |
-
-共通設定（`[common]`）にプラットフォームバージョン・ライブラリをまとめ、PSRAM 関連フラグ（`qio_opi` / `-DBOARD_HAS_PSRAM`）は AtomS3R 系ターゲットのみに付与しています。
 
 ## 依存ライブラリ
 
