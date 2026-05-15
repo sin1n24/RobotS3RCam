@@ -29,6 +29,13 @@
  *   ペアリング時は新 MAC を先頭に追加 (超過分は末尾を捨てる)。
  *
  * ============================================================
+ * [動作モード — ROLE_CTRLR]
+ *   Mode::R_CON  右手持ちコントローラ (Aダブルクリックで切替)
+ *   Mode::L_CON  左手持ちコントローラ
+ *   Mode::ROBOT  ロボット動作 (M5Avatar表示、サーボ駆動)
+ *   → /param.ini に保存、切替時に esp_restart()
+ * ============================================================
+ *
  * [ペアリング手順]
  *   1. 両機種を起動
  *   2. atoms3r-ctrlr の Aボタン長押し → ENQ 送信
@@ -39,8 +46,9 @@
  * [ピン配置]
  *   atoms3r-ctrlr 可変抵抗 H軸 : G8
  *   atoms3r-ctrlr 可変抵抗 V軸 : G7
- *   atoms3r-robot サーボ1      : G5  (LEDC_TIMER_1 / CH_1)
- *   atoms3r-robot サーボ2      : G6  (LEDC_TIMER_1 / CH_2)
+ *   atoms3r-robot / ctrlr-robot サーボ1 : G5  (LEDC CH_1)
+ *   atoms3r-robot / ctrlr-robot サーボ2 : G6  (LEDC CH_2)
+ *   atoms3r-robot / ctrlr-robot サーボ3 : G7  (LEDC CH_3)
  */
 
 #include <M5Unified.h>
@@ -373,24 +381,37 @@ void loop() {
 
 
 // ================================================================
-//  ROLE_CTRLR : atoms3r-ctrlr (AtomS3R)
-//  LCD表示 + ADC + 制御パケット送信 + ペアリング + MAC履歴管理
+//  ROLE_CTRLR : atoms3r-ctrlr / atoms3-ctrlr
+//  動作モード (Aダブルクリックで切替・再起動):
+//    Mode::R_CON  右手持ちコントローラ — ADC + 制御送信 + 映像受信
+//    Mode::L_CON  左手持ちコントローラ — 同上 (反転)
+//    Mode::ROBOT  ロボット動作 — 制御受信 + サーボ駆動 + M5Avatar
 // ================================================================
 #ifdef ROLE_CTRLR
+
+#include <Avatar.h>
+using namespace m5avatar;
+
+// ---- 動作モード ----
+enum Mode : uint8_t { MODE_R_CON = 0, MODE_L_CON = 1, MODE_ROBOT = 2 };
+static Mode current_mode = MODE_R_CON;
 
 ESPNowCam radio;
 
 static constexpr int LCD_W = 128;
 static constexpr int LCD_H = 128;
 
-static uint8_t           recvBuf[64 * 1024];
+// 受信バッファ (Con モードで映像を受ける可能性があるため 64KB)
+static uint8_t recvBuf[64 * 1024];
+
+// ---- Con モード: 映像受信 ----
 static volatile bool          frameReady    = false;
 static volatile uint32_t      frameLen      = 0;
 static volatile unsigned long last_frame_ms = 0;
 static bool                   was_live      = false;
 static constexpr unsigned long FRAME_TIMEOUT_MS = 2000;
 
-// ADC + ハードウェアボタン
+// ---- Con モード: ADC + ハードウェアボタン ----
 static constexpr int ADC_H_PIN  = 8;
 static constexpr int ADC_V_PIN  = 7;
 static constexpr int TRG_SW_PIN = 5;
@@ -403,44 +424,85 @@ static int   log_cnt = 0;
 static float joy_h   = 0.0f;
 static float joy_v   = 0.0f;
 
-// MAC 管理
+// ---- Con モード: MAC 管理 ----
 static uint8_t macList[MAC_LIST_MAX][6];
 static int     macCount  = 0;
 static bool    is_paired = false;
 static uint8_t target_addr[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
-// 応答待ちフラグ
 static volatile bool pong_received = false;
 static volatile bool ack_received  = false;
 static uint8_t       response_mac[6] = {};
 
-// L/R モード
-static const char* PARAM_FILE = "/param.ini";
-static bool lr_reversed = false;
+// ---- Robot モード: サーボ (G5/G6/G7) ----
+static constexpr int SV_PIN1   = 5;
+static constexpr int SV_PIN2   = 6;
+static constexpr int SV_PIN3   = 7;
+static constexpr int SV_CH1    = 1;
+static constexpr int SV_CH2    = 2;
+static constexpr int SV_CH3    = 3;
+static constexpr int SV_FREQ   = 50;
+static constexpr int SV_BITS   = 10;
+static constexpr int SV_MIN_W  = 26;
+static constexpr int SV_MAX_W  = 125;
+static constexpr int SV_ARM_A  = -70;
+static constexpr int SV_ARM_B  = -55;
+static constexpr int SV_ARM_C  = -10;
+static constexpr int SV_ARM_NG =  70;
+
+static volatile int           sv_left       = 0;
+static volatile int           sv_right      = 0;
+static volatile uint8_t       sv_btn        = 0;
+static volatile unsigned long sv_recv_ms    = 0;
+
+static bool sv_arm_mode_b = false;
+static bool sv_ng_hold    = false;
+static bool sv_ok_prev    = false;
+static bool sv_ng_prev    = false;
+
+static int            sv_out_left  = 0;
+static int            sv_out_right = 0;
+static int            sv_out_arm   = 0;
+static unsigned long  sv_ease_ms   = 0;
+static constexpr int  SV_EASE_DPS  = 90;
+
+// ---- 共通: deferred 返信 (ENQ/PING 応答、Robot モードで使用) ----
+static volatile bool  pending_reply = false;
+static uint8_t        pending_reply_pkt[PKT_MAC_LEN];
+
+// ---- M5Avatar (Robot モード) ----
+static Avatar avatar;
 
 // ----------------------------------------------------------------
-//  SPIFFS — param.ini (L/R モード)
+//  SPIFFS — param.ini (モード保存)
+//  文字: 'R'=R_CON  'L'=L_CON  'O'=rObot
 // ----------------------------------------------------------------
+static const char* PARAM_FILE = "/param.ini";
+
 static void loadParam() {
+    current_mode = MODE_R_CON;
     if (!SPIFFS.exists(PARAM_FILE)) return;
     File f = SPIFFS.open(PARAM_FILE, FILE_READ);
     if (!f) return;
     String line = f.readStringUntil('\n');
     f.close();
-    lr_reversed = (line.indexOf('L') >= 0);
-    Serial.printf("[PARAM] mode=%c\n", lr_reversed ? 'L' : 'R');
+    if      (line.indexOf('L') >= 0) current_mode = MODE_L_CON;
+    else if (line.indexOf('O') >= 0) current_mode = MODE_ROBOT;
+    Serial.printf("[PARAM] mode=%d\n", (int)current_mode);
 }
 
 static void saveParam() {
     File f = SPIFFS.open(PARAM_FILE, FILE_WRITE);
     if (!f) { Serial.println("[PARAM] write failed"); return; }
-    f.printf("mode=%c\n", lr_reversed ? 'L' : 'R');
+    char ch = (current_mode == MODE_L_CON) ? 'L'
+            : (current_mode == MODE_ROBOT)  ? 'O' : 'R';
+    f.printf("mode=%c\n", ch);
     f.close();
-    Serial.printf("[PARAM] saved mode=%c\n", lr_reversed ? 'L' : 'R');
+    Serial.printf("[PARAM] saved mode=%d\n", (int)current_mode);
 }
 
 // ----------------------------------------------------------------
-//  SPIFFS — mac.txt (MAC 履歴)
+//  SPIFFS — mac.txt (MAC 履歴、Con モードのみ使用)
 // ----------------------------------------------------------------
 static void loadMacList() {
     macCount = 0;
@@ -465,7 +527,6 @@ static void saveMacList() {
     Serial.printf("[MAC] saved %d entries\n", macCount);
 }
 
-// MAC を先頭に追加、重複除去、超過分は末尾を捨てる
 static void prependMac(const uint8_t* mac) {
     uint8_t tmp[MAC_LIST_MAX][6];
     int newCount = 0;
@@ -480,28 +541,56 @@ static void prependMac(const uint8_t* mac) {
 }
 
 // ----------------------------------------------------------------
-//  ESPNowCam 受信コールバック (映像 + 制御応答 共通)
+//  ESPNowCam 受信コールバック (モードで処理を切替)
 // ----------------------------------------------------------------
 static void onDataRecv(uint32_t length) {
-    if (length < 2) return;
+    if (current_mode == MODE_ROBOT) {
+        // Robot モード: 制御パケット + ENQ/PING 受信
+        if (length < 4) return;
+        uint8_t myMac[6];
+        esp_read_mac(myMac, ESP_MAC_WIFI_STA);
+        if (matchId(recvBuf, ID_ENQ) && length >= (uint32_t)PKT_MAC_LEN) {
+            uint8_t* src = recvBuf + 4;
+            Serial.printf("[PAIR] ENQ from %02X:%02X:%02X:%02X:%02X:%02X\n",
+                src[0],src[1],src[2],src[3],src[4],src[5]);
+            memcpy(pending_reply_pkt,     ID_ACK, 4);
+            memcpy(pending_reply_pkt + 4, myMac,  6);
+            pending_reply = true;
+            return;
+        }
+        if (matchId(recvBuf, ID_PING) && length >= (uint32_t)PKT_MAC_LEN) {
+            uint8_t* src = recvBuf + 4;
+            Serial.printf("[PING] from %02X:%02X:%02X:%02X:%02X:%02X\n",
+                src[0],src[1],src[2],src[3],src[4],src[5]);
+            memcpy(pending_reply_pkt,     ID_PONG, 4);
+            memcpy(pending_reply_pkt + 4, myMac,   6);
+            pending_reply = true;
+            return;
+        }
+        if (matchId(recvBuf, ID_CTRL) && length >= (uint32_t)PKT_CTRL_LEN) {
+            sv_left    = (int)recvBuf[4] - SERVO_OFFSET;
+            sv_right   = (int)recvBuf[5] - SERVO_OFFSET;
+            sv_btn     = recvBuf[6];
+            sv_recv_ms = millis();
+            Serial.printf("[CTRL] L=%+d R=%+d btn=0x%02X\n", sv_left, sv_right, sv_btn);
+        }
+        return;
+    }
 
-    // 映像フレーム (JPEG ヘッダで識別)
+    // Con モード: 映像フレーム + ACK/PONG 受信
+    if (length < 2) return;
     if (isJpeg(recvBuf)) {
         frameLen      = length;
         frameReady    = true;
         last_frame_ms = millis();
         return;
     }
-
     if (length < 4) return;
-
-    // ACK 受信 (ペアリング応答)
     if (matchId(recvBuf, ID_ACK) && length >= (uint32_t)PKT_MAC_LEN) {
         memcpy(response_mac, recvBuf + 4, 6);
         ack_received = true;
         return;
     }
-    // PONG 受信 (疎通確認応答)
     if (matchId(recvBuf, ID_PONG) && length >= (uint32_t)PKT_MAC_LEN) {
         memcpy(response_mac, recvBuf + 4, 6);
         pong_received = true;
@@ -510,7 +599,7 @@ static void onDataRecv(uint32_t length) {
 }
 
 // ----------------------------------------------------------------
-//  ステータス管理
+//  ステータスバー (Con モード)
 // ----------------------------------------------------------------
 static char last_status[32] = "";
 
@@ -529,19 +618,23 @@ static void drawStatusBar() {
 }
 
 // ----------------------------------------------------------------
-//  L/R モード適用 + モード切替アニメーション (old_src draw_matrix 移植)
+//  LCD 回転適用
 // ----------------------------------------------------------------
+static void applyLrMode() {
+    M5.Display.setRotation(current_mode == MODE_L_CON ? 2 : 0);
+}
 
-// old_src から移植: 5×5ドットフォント (ASCII 27-126, 5byte/char)
+// ----------------------------------------------------------------
+//  5×5 ドットマトリクスフォント (Con モード起動アニメーション)
+// ----------------------------------------------------------------
 static constexpr int      MX_ASCII_START = 27;
 static constexpr int      MX_CHAR_BYTES  = 5;
-static constexpr int      MX_SHIFT       = 15;   // グリッド原点オフセット (px)
-static constexpr int      MX_STEP        = 25;   // ドット間隔 (px)
-static constexpr int      MX_RADIUS      = 8;    // ドット半径 (px)
-static constexpr int      MX_DELAY_MS    = 120;  // 文字間ディレイ (MATRIX_CHAR_DELAY_MS_FAST)
+static constexpr int      MX_SHIFT       = 15;
+static constexpr int      MX_STEP        = 25;
+static constexpr int      MX_RADIUS      = 8;
+static constexpr int      MX_DELAY_MS    = 120;
 static constexpr uint32_t MX_WHITE       = 0xFFFFFF;
 
-// old_src FONTDATA[500] をそのままコピー
 static const uint8_t FONTDATA[500] = {
     0x0A,0x0A,0x00,0x11,0x0E, 0x00,0x0A,0x00,0x11,0x0E, 0x0A,0x0A,0x00,0x11,0x0E, 0x00,0x0A,0x00,0x11,0x0E,
     0x0,0x0,0x0,0x0,0x5,  0x0,0x0,0x0,0x0,0x0,
@@ -579,12 +672,6 @@ static const uint8_t FONTDATA[500] = {
     0x8,0x8,0x8,0x8,0x8,      0x18,0x8,0xc,0x88,0x18,    0x0,0x0,0xc,0x83,0x60
 };
 
-static void applyLrMode() {
-    // old_src: M5.Display.setRotation(lefty?2:0)
-    M5.Display.setRotation(lr_reversed ? 2 : 0);
-}
-
-// old_src draw_matrix() のLCD移植版: 5×5ドットマトリクスで1文字描画
 static void draw_matrix(char ch, uint32_t color, uint32_t bColor) {
     if (ch < MX_ASCII_START || ch > 126) return;
     int start = ((int)ch - MX_ASCII_START) * MX_CHAR_BYTES;
@@ -599,7 +686,6 @@ static void draw_matrix(char ch, uint32_t color, uint32_t bColor) {
     }
 }
 
-// old_src draw_matrix_str() 移植: 文字列を1文字ずつ切り替えて表示
 static void draw_matrix_str(const char* str, int delay_ms, uint32_t color, uint32_t bColor) {
     for (int i = 0; str[i] != '\0'; i++) {
         draw_matrix(str[i], color, bColor);
@@ -607,30 +693,67 @@ static void draw_matrix_str(const char* str, int delay_ms, uint32_t color, uint3
     }
 }
 
-static void showModeAnim() {
+// ----------------------------------------------------------------
+//  起動アニメーション
+// ----------------------------------------------------------------
+
+// Robot モード: "Robot " マトリクスアニメーション (緑色)
+static void showRobotAnim() {
+    M5.Display.setRotation(0);
     M5.Display.fillScreen(TFT_BLACK);
-    draw_matrix_str(lr_reversed ? "L con " : "R con ", MX_DELAY_MS, MX_WHITE, 0);
-    if (last_status[0] != '\0') {
-        M5.Display.fillRect(0, LCD_H - 10, LCD_W, 10, TFT_BLACK);
-        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-        M5.Display.setTextSize(1);
-        M5.Display.setCursor(2, LCD_H - 9);
-        M5.Display.print(last_status);
-    }
+    draw_matrix_str("Robot ", MX_DELAY_MS, 0x00FF00, 0);
+}
+
+// Con モード: "R con" / "L con" マトリクスアニメーション + ステータスバー
+static void showConAnim() {
+    M5.Display.fillScreen(TFT_BLACK);
+    draw_matrix_str(current_mode == MODE_L_CON ? "L con " : "R con ", MX_DELAY_MS, MX_WHITE, 0);
+    drawStatusBar();
 }
 
 // ----------------------------------------------------------------
-//  ADC + 制御パケット送信
+//  Robot モード: サーボ
+// ----------------------------------------------------------------
+static void initServo() {
+    pinMode(SV_PIN1, OUTPUT);
+    ledcSetup(SV_CH1, SV_FREQ, SV_BITS);
+    ledcAttachPin(SV_PIN1, SV_CH1);
+    pinMode(SV_PIN2, OUTPUT);
+    ledcSetup(SV_CH2, SV_FREQ, SV_BITS);
+    ledcAttachPin(SV_PIN2, SV_CH2);
+    pinMode(SV_PIN3, OUTPUT);
+    ledcSetup(SV_CH3, SV_FREQ, SV_BITS);
+    ledcAttachPin(SV_PIN3, SV_CH3);
+    Serial.println("[SERVO] init OK  G5/CH1  G6/CH2  G7/CH3");
+}
+
+static void setServo(int d1, int d2) {
+    ledcWrite(SV_CH1, map(d1, -90, 90, SV_MIN_W, SV_MAX_W));
+    ledcWrite(SV_CH2, map(d2, -90, 90, SV_MIN_W, SV_MAX_W));
+}
+
+static void setArm(int deg) {
+    ledcWrite(SV_CH3, map(deg, -90, 90, SV_MIN_W, SV_MAX_W));
+}
+
+static int easeToward(int cur, int target, int step) {
+    if (cur < target) return min(cur + step, target);
+    if (cur > target) return max(cur - step, target);
+    return cur;
+}
+
+// ----------------------------------------------------------------
+//  Con モード: ADC + 制御パケット送信
 // ----------------------------------------------------------------
 static void readADC() {
-    h_log[log_cnt] = 1.0f - 2.0f * analogRead(ADC_H_PIN) / ADC_MAX_VALUE;
-    v_log[log_cnt] = 1.0f - 2.0f * analogRead(ADC_V_PIN) / ADC_MAX_VALUE;
+    float sign = (current_mode == MODE_L_CON) ? -1.0f : 1.0f;
+    h_log[log_cnt] = sign * (1.0f - 2.0f * analogRead(ADC_H_PIN) / ADC_MAX_VALUE);
+    v_log[log_cnt] = sign * (1.0f - 2.0f * analogRead(ADC_V_PIN) / ADC_MAX_VALUE);
     if (++log_cnt >= LOG_SIZE) log_cnt = 0;
     float sh = 0, sv = 0;
     for (int i = 0; i < LOG_SIZE; i++) { sh += h_log[i]; sv += v_log[i]; }
-    float sign = lr_reversed ? -1.0f : 1.0f;
-    joy_h = sign * deadbanded(sh / LOG_SIZE, DEADBAND);
-    joy_v = sign * deadbanded(sv / LOG_SIZE, DEADBAND);
+    joy_h = deadbanded(sh / LOG_SIZE, DEADBAND);
+    joy_v = deadbanded(sv / LOG_SIZE, DEADBAND);
 }
 
 static void sendCtrlPacket() {
@@ -656,7 +779,7 @@ static void ctrlTimerCb(void* /*arg*/) {
 }
 
 // ----------------------------------------------------------------
-//  疎通確認 ping
+//  Con モード: 疎通確認 ping / ペアリング
 // ----------------------------------------------------------------
 static bool pingMac(const uint8_t* mac) {
     uint8_t myMac[6];
@@ -665,16 +788,12 @@ static bool pingMac(const uint8_t* mac) {
     memcpy(pkt,     ID_PING, 4);
     memcpy(pkt + 4, myMac,   6);
     pong_received = false;
-
-    // ping はブロードキャスト送信 (robot が誰でも応答できるよう)
     radio.sendData(pkt, PKT_MAC_LEN);
-
     unsigned long t = millis();
     while (millis() - t < (unsigned long)PING_TIMEOUT_MS) {
         if (pong_received) {
-            // 応答 MAC が期待する MAC と一致するか確認
             if (memcmp(response_mac, mac, 6) == 0) return true;
-            pong_received = false; // 別機器からの応答は無視
+            pong_received = false;
         }
         delay(5);
     }
@@ -699,9 +818,6 @@ static bool resolveMac() {
     return false;
 }
 
-// ----------------------------------------------------------------
-//  ペアリング
-// ----------------------------------------------------------------
 static void doPairing() {
     Serial.println("[PAIR] sending ENQ...");
     M5.Display.fillScreen(TFT_BLACK);
@@ -757,55 +873,145 @@ void setup() {
     Serial.println("=== atoms3r-ctrlr (STEP2) ===");
 
     SPIFFS.begin(true);
+    loadParam();
 
-    M5.Display.fillScreen(TFT_BLACK);
-
-    pinMode(ADC_H_PIN, ANALOG);
-    pinMode(ADC_V_PIN, ANALOG);
-    pinMode(TRG_SW_PIN, INPUT_PULLUP);
-    pinMode(OK_SW_PIN,  INPUT_PULLUP);
-    pinMode(NG_SW_PIN,  INPUT_PULLUP);
-
-    // ESPNowCam 映像受信 + 制御応答受信
     radio.setRecvBuffer(recvBuf);
     radio.setRecvCallback(onDataRecv);
     radio.setChannel(WIFI_CHANNEL);
     radio.init();
     Serial.println("[RADIO] init OK");
 
-    // パラメータ読み込み → 表示回転適用
-    loadParam();
-    applyLrMode();
-
-    // MAC リスト読み込み → 疎通確認
-    loadMacList();
-    if (macCount > 0) {
-        is_paired = resolveMac();
-    }
-
-    if (is_paired) {
-        Serial.println("[MAC] P2P mode");
-        setStatus("PAIRED");
+    if (current_mode == MODE_ROBOT) {
+        // ---- Robot モード ----
+        initServo();
+        setServo(0, 0);
+        setArm(0);
+        Serial.println("Ready (robot mode)");
+        showRobotAnim();
+        M5.Display.setRotation(2);
+        avatar.setScale(0.4f);
+        avatar.setPosition(-56, -96);
+        avatar.init();
+        avatar.setExpression(Expression::Sleepy);
     } else {
-        memcpy(target_addr, BROADCAST_ADDR, 6);
-        Serial.println("[MAC] broadcast mode");
-        setStatus("NO PAIR  Hold A:pair");
+        // ---- Con モード (R / L) ----
+        applyLrMode();
+        pinMode(ADC_H_PIN, ANALOG);
+        pinMode(ADC_V_PIN, ANALOG);
+        pinMode(TRG_SW_PIN, INPUT_PULLUP);
+        pinMode(OK_SW_PIN,  INPUT_PULLUP);
+        pinMode(NG_SW_PIN,  INPUT_PULLUP);
+
+        loadMacList();
+        if (macCount > 0) is_paired = resolveMac();
+
+        if (is_paired) {
+            Serial.println("[MAC] P2P mode");
+            setStatus("PAIRED");
+        } else {
+            memcpy(target_addr, BROADCAST_ADDR, 6);
+            Serial.println("[MAC] broadcast mode");
+            setStatus("NO PAIR  Hold A:pair");
+        }
+
+        esp_timer_handle_t t;
+        esp_timer_create_args_t ta = {};
+        ta.callback = ctrlTimerCb;
+        ta.name     = "ctrl";
+        esp_timer_create(&ta, &t);
+        esp_timer_start_periodic(t, CTRL_INTERVAL_US);
+
+        Serial.println("Ready");
+        showConAnim();
     }
-
-    // 制御タイマー (20ms)
-    esp_timer_handle_t t;
-    esp_timer_create_args_t ta = {};
-    ta.callback = ctrlTimerCb;
-    ta.name     = "ctrl";
-    esp_timer_create(&ta, &t);
-    esp_timer_start_periodic(t, CTRL_INTERVAL_US);
-
-    Serial.println("Ready");
-    showModeAnim();
 }
 
 void loop() {
     M5.update();
+
+    // Aダブルクリック → モード切替 (R→L→Robot→R...) → 再起動
+    if (M5.BtnA.wasDoubleClicked()) {
+        current_mode = (Mode)((current_mode + 1) % 3);
+        saveParam();
+        esp_restart();
+    }
+
+    if (current_mode == MODE_ROBOT) {
+        // ---- Robot モード ----
+        if (pending_reply) {
+            pending_reply = false;
+            radio.sendData(pending_reply_pkt, PKT_MAC_LEN);
+        }
+
+        bool recent = (millis() - sv_recv_ms) < (unsigned long)RECV_TIMEOUT_MS;
+
+        bool cur_ok  = recent && ((sv_btn >> 1) & 1);
+        bool cur_ng  = recent && ((sv_btn >> 2) & 1);
+        bool cur_trg = recent && ((sv_btn >> 4) & 1);
+
+        if (cur_ok && !sv_ok_prev) { sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
+        sv_ok_prev = cur_ok;
+        if (cur_ng && !sv_ng_prev) sv_ng_hold = !sv_ng_hold;
+        sv_ng_prev = cur_ng;
+
+        int arm_target;
+        if (!recent)          arm_target = 0;
+        else if (cur_trg)     arm_target = SV_ARM_C;
+        else if (sv_ng_hold)  arm_target = SV_ARM_NG;
+        else                  arm_target = sv_arm_mode_b ? SV_ARM_B : SV_ARM_A;
+
+        if (recent) {
+            sv_out_left  = sv_left;
+            sv_out_right = sv_right;
+            sv_out_arm   = arm_target;
+            sv_ease_ms   = millis();
+        } else {
+            sv_out_left  = 0;
+            sv_out_right = 0;
+            unsigned long now     = millis();
+            unsigned long elapsed = now - sv_ease_ms;
+            if (elapsed > 500) elapsed = 500;
+            int step = max(1, (int)((long)SV_EASE_DPS * (long)elapsed / 1000));
+            sv_ease_ms  = now;
+            sv_out_arm  = easeToward(sv_out_arm, 0, step);
+        }
+        setServo(sv_out_left, sv_out_right);
+        setArm(sv_out_arm);
+
+        // アバター表情: 走行状態 + ボタンで決定
+        {
+            static Expression prev_expr = Expression::Sleepy;
+            static constexpr int MOVE_THRESH = 15;
+            Expression expr;
+            if (!recent) {
+                expr = Expression::Sleepy;
+            } else if (cur_trg) {
+                expr = Expression::Happy;
+            } else {
+                bool fwd  = sv_out_left >  MOVE_THRESH && sv_out_right >  MOVE_THRESH;
+                bool back = sv_out_left < -MOVE_THRESH && sv_out_right < -MOVE_THRESH;
+                bool spin = (sv_out_left >  MOVE_THRESH && sv_out_right < -MOVE_THRESH) ||
+                            (sv_out_left < -MOVE_THRESH && sv_out_right >  MOVE_THRESH);
+                if      (fwd)  expr = Expression::Happy;
+                else if (back) expr = Expression::Sad;
+                else if (spin) expr = Expression::Angry;
+                else           expr = Expression::Neutral;
+            }
+            if (expr != prev_expr) {
+                prev_expr = expr;
+                avatar.setExpression(expr);
+            }
+        }
+        return;
+    }
+
+    // ---- Con モード ----
+
+    // Aボタン長押し → ペアリング
+    if (M5.BtnA.wasHold()) {
+        doPairing();
+        showConAnim();
+    }
 
     // 映像タイムアウト監視 → ON AIR / NO SIGNAL 切替
     bool is_live = (last_frame_ms != 0) &&
@@ -817,20 +1023,6 @@ void loop() {
         drawStatusBar();
     }
     was_live = is_live;
-
-    // Aボタンダブルクリック → L/R モード切替 + /param.ini 保存
-    if (M5.BtnA.wasDoubleClicked()) {
-        lr_reversed = !lr_reversed;
-        saveParam();
-        applyLrMode();
-        showModeAnim();
-    }
-
-    // Aボタン長押し → ペアリング
-    if (M5.BtnA.wasHold()) {
-        doPairing();
-        showModeAnim();
-    }
 
     // 映像表示 (LCD全面 128×128) + ステータスバー重ね描き
     if (frameReady) {

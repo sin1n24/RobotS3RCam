@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>ms counter</title></head>
+<body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh;overflow:hidden">
+  <div id="t" style="color:#0f0;font-size:28vw;font-family:monospace;font-weight:bold;letter-spacing:-0.02em"></div>
+  <script>
+    const el = document.getElementById('t');
+    // 10ms 単位 (centiseconds) を 3桁表示、50ms ごとに更新
+    setInterval(() => {
+      el.textContent = ((Date.now() / 10 | 0) % 1000).toString().padStart(3, '0');
+    }, 50);
+  </script>
+</body>
+</html>
