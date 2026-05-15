@@ -1,6 +1,6 @@
 # Robot S3RCam
 
-AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロボット。
+AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカメラ遠隔操縦ロボット。
 
 [![動画サムネイル](https://img.youtube.com/vi/P5PM_GwRe_A/maxresdefault.jpg)](https://youtu.be/P5PM_GwRe_A)
 
@@ -21,13 +21,16 @@ AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロ�
 |--------|--------|--------|----------------|
 | ロボット | 映像送信・サーボ駆動 | AtomS3R-CAM | `atoms3r-robot` |
 | コントローラ | LCD表示・操作入力 | AtomS3R | `atoms3r-ctrlr` |
+| コントローラ | LCD表示・操作入力 | AtomS3 | `atoms3-ctrlr` |
+
+> AtomS3R と AtomS3 はコントローラとして互換。AtomS3 は PSRAM なしのため、ビルドターゲットを `atoms3-ctrlr` に切り替えてください。
 
 ### 部品表 (BOM)
 | 一般名 | 品名 | 参考価格 |
 |--------|--------|----------------|
 | カメラ付きマイコン | [AtomS3R-CAM](https://ssci.to/9916) | ¥3,630 |
 | サーボ接続基板 | [ATOM向 サーボ基板キット](https://ssci.to/11122) | ¥1,000 |
-| 液晶付きマイコン | [AtomS3R](https://ssci.to/9915) | ¥3,443 |
+| 液晶付きマイコン | [AtomS3R](https://ssci.to/9915) または [AtomS3](https://ssci.to/9840) | ¥3,443 / ¥2,783 |
 | コントローラ | [小型コントローラ(キット)](https://ssci.to/9521) | ¥3,000 |
 | マイクロサーボ | [FS90](https://akizukidenshi.com/catalog/g/g114806/)/[FS90R](https://akizukidenshi.com/catalog/g/g113206/) | ¥500 |
 | 電源 | LiPoバッテリー / 乾電池ボックス（3.3〜5V対応） | 〜¥500 |
@@ -36,14 +39,15 @@ AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロ�
 
 ## 開発・ビルド環境
 
-[PlatformIO](https://platformio.org/) を使用しています。`platformio.ini` で2つのビルドターゲットを定義しており、同一のソースコードをフラグで切り替えてロボット／コントローラどちらにも書き込めます。
+[PlatformIO](https://platformio.org/) を使用しています。`platformio.ini` で3つのビルドターゲットを定義しており、同一のソースコードをフラグで切り替えてロボット／コントローラどちらにも書き込めます。
 
 | ターゲット | 書き込み先 | アップロードコマンド |
 |-----------|-----------|-------------------|
 | `atoms3r-robot` | AtomS3R-CAM | `pio run -e atoms3r-robot -t upload` |
 | `atoms3r-ctrlr` | AtomS3R | `pio run -e atoms3r-ctrlr -t upload` |
+| `atoms3-ctrlr` | AtomS3 | `pio run -e atoms3-ctrlr -t upload` |
 
-共通設定（`[common]`）にプラットフォームバージョン・ライブラリ・PSRAM有効化フラグをまとめ、各ターゲットは `-DROLE_ROBOT` / `-DROLE_CTRLR` フラグで役割を切り替えます。
+共通設定（`[common]`）にプラットフォームバージョン・ライブラリをまとめ、PSRAM 関連フラグ（`qio_opi` / `-DBOARD_HAS_PSRAM`）は AtomS3R 系ターゲットのみに付与しています。各ターゲットは `-DROLE_ROBOT` / `-DROLE_CTRLR` フラグで役割を切り替えます。AtomS3 向けには `-DBOARD_ATOMS3` も追加されます。
 
 ## ピン配置
 
@@ -55,7 +59,7 @@ AtomS3R-CAM + AtomS3R による ESP-NOW ワイヤレスカメラ遠隔操縦ロ�
 | G6 / LEDC CH2 | サーボ2（右） |
 | G7 / LEDC CH3 | サーボ3（アーム） |
 
-### atoms3r-ctrlr
+### ctrlr 共通（atoms3r-ctrlr / atoms3-ctrlr）
 
 | ピン | 用途 |
 |------|------|
@@ -93,7 +97,7 @@ Aボタンダブルクリックで切替。`/param.ini` に保存される。
 | C（TRG押下中） | -10° |
 | NG（NGトグル） | +70° |
 
-タイムアウト・通信切断時は全サーボ0°へゆっくり移動（約90°/秒）。
+タイムアウト・通信切断時は車輪（サーボ1/2）が即時停止し、アーム（サーボ3）のみゆっくり0°へ移動（約90°/秒）。
 
 ## ステータス表示
 

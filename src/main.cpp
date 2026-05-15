@@ -345,15 +345,15 @@ void loop() {
         sv_out_arm   = arm_target;
         ease_last_ms = millis();
     } else {
-        // タイムアウト: 0° へゆっくりイージング
+        // タイムアウト: 車輪はすぐ停止、アームのみゆっくりイージング
+        sv_out_left  = 0;
+        sv_out_right = 0;
         unsigned long now     = millis();
         unsigned long elapsed = now - ease_last_ms;
         if (elapsed > 500) elapsed = 500;
         int step = max(1, (int)((long)EASE_DEG_PER_SEC * (long)elapsed / 1000));
         ease_last_ms = now;
-        sv_out_left  = easeToward(sv_out_left,  0, step);
-        sv_out_right = easeToward(sv_out_right, 0, step);
-        sv_out_arm   = easeToward(sv_out_arm,   0, step);
+        sv_out_arm   = easeToward(sv_out_arm, 0, step);
     }
     setServo(sv_out_left, sv_out_right);
     setArm(sv_out_arm);
@@ -637,10 +637,10 @@ static void sendCtrlPacket() {
     int left  = constrain(-(int)(MAX_SPEED * (-joy_v - joy_h)), -90, 90);
     int right = constrain( (int)(MAX_SPEED * (-joy_v + joy_h)), -90, 90);
     uint8_t btn = 0;
-    if (M5.BtnA.isPressed())          btn |= (1 << 0);
-    if (!digitalRead(OK_SW_PIN))      btn |= (1 << 1);
-    if (!digitalRead(NG_SW_PIN))      btn |= (1 << 2);
-    if (!digitalRead(TRG_SW_PIN))     btn |= (1 << 4);
+    if (M5.BtnA.isPressed())      btn |= (1 << 0);
+    if (!digitalRead(OK_SW_PIN))  btn |= (1 << 1);
+    if (!digitalRead(NG_SW_PIN))  btn |= (1 << 2);
+    if (!digitalRead(TRG_SW_PIN)) btn |= (1 << 4);
     uint8_t pkt[PKT_CTRL_LEN] = {
         ID_CTRL[0], ID_CTRL[1], ID_CTRL[2], ID_CTRL[3],
         (uint8_t)(left  + SERVO_OFFSET),
