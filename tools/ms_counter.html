@@ -1,8 +1,16 @@
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>ms counter</title></head>
-<body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh;overflow:hidden">
-  <div id="t" style="color:#0f0;font-size:28vw;font-family:monospace;font-weight:bold;letter-spacing:-0.02em"></div>
+<body style="margin:0;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;overflow:hidden;gap:3vh">
+  <div style="color:#555;font-size:2.2vw;font-family:monospace;text-align:center;line-height:1.8">
+    遅延測定用カウンタ<br>
+    単位: <span style="color:#0a0">10 ms</span>（表示値 &times; 10 = 経過ミリ秒）
+  </div>
+  <div id="t" style="color:#0f0;font-size:28vw;font-family:monospace;font-weight:bold;letter-spacing:-0.02em;line-height:1"></div>
+  <div style="color:#555;font-size:2.2vw;font-family:monospace;text-align:center;line-height:1.8">
+    0 &rarr; 999 で 10秒周期リセット<br>
+    PC画面の値 &minus; LCD画面の値 &asymp; 遅延
+  </div>
   <script>
     const el = document.getElementById('t');
     // 10ms 単位 (centiseconds) を 3桁表示、50ms ごとに更新

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>bar counter</title></head>
+<body style="margin:0;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:3vh;overflow:hidden">
+
+  <div style="color:#555;font-size:2vw;font-family:monospace;text-align:center;line-height:1.9">
+    遅延測定バーカウンタ &nbsp;｜&nbsp; 1秒で左端 &rarr; 右端<br>
+    PC と LCD で<span style="color:#fff">白い縦線</span>の位置を比べる &nbsp;&rarr;&nbsp; 差 (px) &times; 1ms &asymp; 遅延
+  </div>
+
+  <!-- バー本体 -->
+  <div style="position:relative;width:90vw;height:28vh;background:#111;overflow:hidden">
+
+    <!-- 目盛り (100ms ごと = 10%) -->
+    <div style="position:absolute;inset:0;display:flex;pointer-events:none">
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1;border-right:1px solid #2a2a2a"></div>
+      <div style="flex:1"></div>
+    </div>
+
+    <!-- 緑バー + 白い先端ライン -->
+    <div id="bar" style="position:absolute;left:0;top:0;height:100%;width:0%;background:#0a0">
+      <div style="position:absolute;right:0;top:0;bottom:0;width:3px;background:#fff"></div>
+    </div>
+
+  </div>
+
+  <!-- 目盛りラベル -->
+  <div style="width:90vw;display:flex;justify-content:space-between;color:#444;font-family:monospace;font-size:1.6vw;margin-top:-1vh">
+    <span>0</span><span>100</span><span>200</span><span>300</span><span>400</span><span>500</span><span>600</span><span>700</span><span>800</span><span>900</span><span style="color:#555">ms</span>
+  </div>
+
+  <div style="color:#555;font-size:2vw;font-family:monospace;text-align:center;line-height:1.9">
+    残像はバーの後ろに薄く残るので読み取りに影響しない<br>
+    PC画面の白線 &minus; LCD画面の白線 &asymp; 遅延
+  </div>
+
+  <script>
+    const bar = document.getElementById('bar');
+    function tick() {
+      bar.style.width = ((Date.now() % 1000) / 10) + '%';
+      requestAnimationFrame(tick);
+    }
+    tick();
+  </script>
+</body>
+</html>
