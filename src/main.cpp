@@ -157,8 +157,11 @@ static volatile unsigned long last_recv_ms = 0;
 // アーム状態 (servo3)
 static bool sv_arm_mode_b = false;
 static bool sv_ng_hold    = false;
-static bool ok_prev       = false;
-static bool ng_prev       = false;
+
+// ボタン立ち上がりエッジをrecvコールバック内で検出してラッチ
+static volatile bool ok_edge    = false;
+static volatile bool ng_edge    = false;
+static uint8_t       btn_prev_cb = 0;
 
 // サーボ出力バッファ (タイムアウト時イージング用)
 static int            sv_out_left  = 0;
@@ -240,7 +243,14 @@ static void onDataRecv(uint32_t length) {
     uint8_t myMac[6];
     esp_read_mac(myMac, ESP_MAC_WIFI_STA);
 
-    // ENQ → ACK 返信 + ctrl_mac 更新 (再ペアリング許可・常に受け付ける)
+    // ペアリング済みの場合、異なる送信元を拒否 (ENQ含む)
+    if (ctrl_mac_set && memcmp(recv_src_mac, ctrl_mac, 6) != 0) {
+        if (matchId(recvBuf, ID_ENQ))
+            Serial.println("[PAIR] ENQ rejected (already paired)");
+        return;
+    }
+
+    // ENQ → ACK 返信 + ctrl_mac 更新
     if (matchId(recvBuf, ID_ENQ) && length >= (uint32_t)PKT_MAC_LEN) {
         Serial.printf("[PAIR] ENQ from %02X:%02X:%02X:%02X:%02X:%02X\n",
             recv_src_mac[0],recv_src_mac[1],recv_src_mac[2],
@@ -251,9 +261,6 @@ static void onDataRecv(uint32_t length) {
         pending_reply = true;
         return;
     }
-
-    // ペアリング済みの場合、未ペアの送信元を拒否
-    if (ctrl_mac_set && memcmp(recv_src_mac, ctrl_mac, 6) != 0) return;
 
     // PING → PONG 返信
     if (matchId(recvBuf, ID_PING) && length >= (uint32_t)PKT_MAC_LEN) {
@@ -270,7 +277,12 @@ static void onDataRecv(uint32_t length) {
     if (matchId(recvBuf, ID_CTRL) && length >= (uint32_t)PKT_CTRL_LEN) {
         sv_left      = (int)recvBuf[4] - SERVO_OFFSET;
         sv_right     = (int)recvBuf[5] - SERVO_OFFSET;
-        sv_btn       = recvBuf[6];
+        uint8_t new_btn = recvBuf[6];
+        uint8_t rising  = new_btn & ~btn_prev_cb;
+        if ((rising >> 1) & 1) ok_edge = true;
+        if ((rising >> 2) & 1) ng_edge = true;
+        btn_prev_cb  = new_btn;
+        sv_btn       = new_btn;
         last_recv_ms = millis();
         Serial.printf("[CTRL] L=%+d R=%+d btn=0x%02X\n", sv_left, sv_right, sv_btn);
         return;
@@ -365,15 +377,10 @@ void loop() {
 
     bool recent = (millis() - last_recv_ms) < (unsigned long)RECV_TIMEOUT_MS;
 
-    // アーム状態マシン
-    bool cur_ok  = recent && ((sv_btn >> 1) & 1);
-    bool cur_ng  = recent && ((sv_btn >> 2) & 1);
+    // アーム状態マシン (エッジはrecvコールバックでラッチ済み)
+    if (ok_edge) { ok_edge = false; sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
+    if (ng_edge) { ng_edge = false; sv_ng_hold = !sv_ng_hold; }
     bool cur_trg = recent && ((sv_btn >> 4) & 1);
-
-    if (cur_ok && !ok_prev) { sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
-    ok_prev = cur_ok;
-    if (cur_ng && !ng_prev) sv_ng_hold = !sv_ng_hold;
-    ng_prev = cur_ng;
 
     int arm_target;
     if (!recent)         arm_target = 0;
@@ -492,8 +499,9 @@ static volatile unsigned long sv_recv_ms    = 0;
 
 static bool sv_arm_mode_b = false;
 static bool sv_ng_hold    = false;
-static bool sv_ok_prev    = false;
-static bool sv_ng_prev    = false;
+static volatile bool sv_ok_edge    = false;
+static volatile bool sv_ng_edge    = false;
+static uint8_t       sv_btn_prev_cb = 0;
 
 static int            sv_out_left  = 0;
 static int            sv_out_right = 0;
@@ -504,6 +512,10 @@ static constexpr int  SV_EASE_DPS  = 90;
 // ---- 共通: deferred 返信 (ENQ/PING 応答、Robot モードで使用) ----
 static volatile bool  pending_reply = false;
 static uint8_t        pending_reply_pkt[PKT_MAC_LEN];
+
+// ---- Robot モード: ペアリング済みコントローラー MAC (再起動でリセット) ----
+static bool    robot_paired      = false;
+static uint8_t robot_ctrl_mac[6] = {};
 
 // ---- M5Avatar (Robot モード) ----
 static Avatar avatar;
@@ -585,13 +597,23 @@ static void onDataRecv(uint32_t length) {
         uint8_t myMac[6];
         esp_read_mac(myMac, ESP_MAC_WIFI_STA);
         if (matchId(recvBuf, ID_ENQ) && length >= (uint32_t)PKT_MAC_LEN) {
-            uint8_t* src = recvBuf + 4;
+            uint8_t* src = recvBuf + 4;  // ENQ パケット内の送信元MAC
+            if (robot_paired && memcmp(src, robot_ctrl_mac, 6) != 0) {
+                Serial.println("[PAIR] ENQ rejected (already paired)");
+                return;
+            }
+            memcpy(robot_ctrl_mac, src, 6);
+            robot_paired = true;
+            radio.setTarget(robot_ctrl_mac);
             Serial.printf("[PAIR] ENQ from %02X:%02X:%02X:%02X:%02X:%02X\n",
                 src[0],src[1],src[2],src[3],src[4],src[5]);
             memcpy(pending_reply_pkt,     ID_ACK, 4);
             memcpy(pending_reply_pkt + 4, myMac,  6);
             pending_reply = true;
             return;
+        }
+        if (robot_paired && memcmp(recvBuf + 4, robot_ctrl_mac, 6) != 0) {
+            if (matchId(recvBuf, ID_PING)) return;  // 未ペアのPINGも拒否
         }
         if (matchId(recvBuf, ID_PING) && length >= (uint32_t)PKT_MAC_LEN) {
             uint8_t* src = recvBuf + 4;
@@ -603,9 +625,14 @@ static void onDataRecv(uint32_t length) {
             return;
         }
         if (matchId(recvBuf, ID_CTRL) && length >= (uint32_t)PKT_CTRL_LEN) {
-            sv_left    = (int)recvBuf[4] - SERVO_OFFSET;
-            sv_right   = (int)recvBuf[5] - SERVO_OFFSET;
-            sv_btn     = recvBuf[6];
+            sv_left = (int)recvBuf[4] - SERVO_OFFSET;
+            sv_right = (int)recvBuf[5] - SERVO_OFFSET;
+            uint8_t new_btn2 = recvBuf[6];
+            uint8_t rising2  = new_btn2 & ~sv_btn_prev_cb;
+            if ((rising2 >> 1) & 1) sv_ok_edge = true;
+            if ((rising2 >> 2) & 1) sv_ng_edge = true;
+            sv_btn_prev_cb = new_btn2;
+            sv_btn     = new_btn2;
             sv_recv_ms = millis();
             Serial.printf("[CTRL] L=%+d R=%+d btn=0x%02X\n", sv_left, sv_right, sv_btn);
         }
@@ -982,14 +1009,9 @@ void loop() {
 
         bool recent = (millis() - sv_recv_ms) < (unsigned long)RECV_TIMEOUT_MS;
 
-        bool cur_ok  = recent && ((sv_btn >> 1) & 1);
-        bool cur_ng  = recent && ((sv_btn >> 2) & 1);
+        if (sv_ok_edge) { sv_ok_edge = false; sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
+        if (sv_ng_edge) { sv_ng_edge = false; sv_ng_hold = !sv_ng_hold; }
         bool cur_trg = recent && ((sv_btn >> 4) & 1);
-
-        if (cur_ok && !sv_ok_prev) { sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
-        sv_ok_prev = cur_ok;
-        if (cur_ng && !sv_ng_prev) sv_ng_hold = !sv_ng_hold;
-        sv_ng_prev = cur_ng;
 
         int arm_target;
         if (!recent)          arm_target = 0;
