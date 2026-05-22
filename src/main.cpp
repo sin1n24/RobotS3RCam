@@ -186,6 +186,7 @@ static void loadCtrlMac() {
     for (int i = 0; i < 6; i++) ctrl_mac[i] = (uint8_t)f.read();
     f.close();
     ctrl_mac_set = true;
+    radio.setTarget(ctrl_mac);  // 映像をペアのCtrlr宛ユニキャスト送信
     Serial.printf("[CTRL_MAC] %02X:%02X:%02X:%02X:%02X:%02X\n",
         ctrl_mac[0],ctrl_mac[1],ctrl_mac[2],ctrl_mac[3],ctrl_mac[4],ctrl_mac[5]);
 }
@@ -193,6 +194,7 @@ static void loadCtrlMac() {
 static void saveCtrlMac(const uint8_t* mac) {
     memcpy(ctrl_mac, mac, 6);
     ctrl_mac_set = true;
+    radio.setTarget(ctrl_mac);  // 映像をペアのCtrlr宛ユニキャスト送信
     File f = SPIFFS.open(CTRL_MAC_FILE, FILE_WRITE);
     if (!f) return;
     for (int i = 0; i < 6; i++) f.write(ctrl_mac[i]);
@@ -876,6 +878,7 @@ static void doPairing() {
                 response_mac[3],response_mac[4],response_mac[5]);
             prependMac(response_mac);
             memcpy(target_addr, response_mac, 6);
+            radio.setTarget(target_addr);  // 制御パケットをRobot宛ユニキャスト送信
             is_paired = true;
             M5.Display.fillScreen(TFT_GREEN);
             M5.Display.setTextColor(TFT_BLACK, TFT_GREEN);
@@ -939,6 +942,7 @@ void setup() {
         if (macCount > 0) is_paired = resolveMac();
 
         if (is_paired) {
+            radio.setTarget(target_addr);  // 制御パケットをRobot宛ユニキャスト送信
             Serial.println("[MAC] P2P mode");
             setStatus("PAIRED");
         } else {
