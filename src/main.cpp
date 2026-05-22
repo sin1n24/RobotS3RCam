@@ -172,6 +172,33 @@ static constexpr int  EASE_DEG_PER_SEC = 90;
 static volatile bool   pending_reply     = false;
 static uint8_t         pending_reply_pkt[PKT_MAC_LEN];
 
+// ペアリング済みコントローラー MAC (SPIFFS /ctrl.mac に永続化)
+static uint8_t         ctrl_mac[6]      = {};
+static bool            ctrl_mac_set     = false;
+static uint8_t         recv_src_mac[6]  = {};
+static constexpr const char* CTRL_MAC_FILE = "/ctrl.mac";
+
+// --- ctrl_mac SPIFFS 永続化 ---
+static void loadCtrlMac() {
+    if (!SPIFFS.exists(CTRL_MAC_FILE)) return;
+    File f = SPIFFS.open(CTRL_MAC_FILE, FILE_READ);
+    if (!f || f.size() < 6) { if (f) f.close(); return; }
+    for (int i = 0; i < 6; i++) ctrl_mac[i] = (uint8_t)f.read();
+    f.close();
+    ctrl_mac_set = true;
+    Serial.printf("[CTRL_MAC] %02X:%02X:%02X:%02X:%02X:%02X\n",
+        ctrl_mac[0],ctrl_mac[1],ctrl_mac[2],ctrl_mac[3],ctrl_mac[4],ctrl_mac[5]);
+}
+
+static void saveCtrlMac(const uint8_t* mac) {
+    memcpy(ctrl_mac, mac, 6);
+    ctrl_mac_set = true;
+    File f = SPIFFS.open(CTRL_MAC_FILE, FILE_WRITE);
+    if (!f) return;
+    for (int i = 0; i < 6; i++) f.write(ctrl_mac[i]);
+    f.close();
+}
+
 // --- サーボ ---
 static void initServo() {
     pinMode(SERVO_PIN1, OUTPUT);
@@ -211,23 +238,26 @@ static void onDataRecv(uint32_t length) {
     uint8_t myMac[6];
     esp_read_mac(myMac, ESP_MAC_WIFI_STA);
 
-    // ENQ → ACK 返信
+    // ENQ → ACK 返信 + ctrl_mac 更新 (再ペアリング許可・常に受け付ける)
     if (matchId(recvBuf, ID_ENQ) && length >= (uint32_t)PKT_MAC_LEN) {
-        uint8_t* src = recvBuf + 4;
         Serial.printf("[PAIR] ENQ from %02X:%02X:%02X:%02X:%02X:%02X\n",
-            src[0],src[1],src[2],src[3],src[4],src[5]);
-        // ACK をメインループで送信 (recv CB 内から esp_now_send 禁止)
+            recv_src_mac[0],recv_src_mac[1],recv_src_mac[2],
+            recv_src_mac[3],recv_src_mac[4],recv_src_mac[5]);
+        saveCtrlMac(recv_src_mac);
         memcpy(pending_reply_pkt,     ID_ACK, 4);
         memcpy(pending_reply_pkt + 4, myMac,  6);
         pending_reply = true;
         return;
     }
 
+    // ペアリング済みの場合、未ペアの送信元を拒否
+    if (ctrl_mac_set && memcmp(recv_src_mac, ctrl_mac, 6) != 0) return;
+
     // PING → PONG 返信
     if (matchId(recvBuf, ID_PING) && length >= (uint32_t)PKT_MAC_LEN) {
-        uint8_t* src = recvBuf + 4;
         Serial.printf("[PING] from %02X:%02X:%02X:%02X:%02X:%02X\n",
-            src[0],src[1],src[2],src[3],src[4],src[5]);
+            recv_src_mac[0],recv_src_mac[1],recv_src_mac[2],
+            recv_src_mac[3],recv_src_mac[4],recv_src_mac[5]);
         memcpy(pending_reply_pkt,     ID_PONG, 4);
         memcpy(pending_reply_pkt + 4, myMac,   6);
         pending_reply = true;
@@ -287,6 +317,7 @@ void setup() {
 
     if (!initCamera()) { while (true) delay(1000); }
 
+    loadCtrlMac();
     initServo();
     setServo(0, 0);
     setArm(0);
@@ -302,10 +333,12 @@ void setup() {
     // ユーザーコールバックを呼ぶが、送信ロール(robot)では呼ばれないため直接登録。
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 1)
     esp_now_register_recv_cb(
-        [](const esp_now_recv_info_t*, const uint8_t* data, int len) {
+        [](const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+            if (info) memcpy(recv_src_mac, info->src_addr, 6);
 #else
     esp_now_register_recv_cb(
-        [](const uint8_t*, const uint8_t* data, int len) {
+        [](const uint8_t* src, const uint8_t* data, int len) {
+            if (src) memcpy(recv_src_mac, src, 6);
 #endif
             // ヘッダ形式: [0x08][n][0x12][n][payload n bytes]
             if (len >= 5 && data[0] == 0x08 && data[2] == 0x12 && data[1] == data[3]) {
