@@ -73,7 +73,8 @@ static constexpr int     LOG_SIZE         = 5;
 static constexpr int     CTRL_INTERVAL_US = 20 * 1000;
 static constexpr int     RECV_TIMEOUT_MS  = 300;
 static constexpr int     MAC_LIST_MAX     = 5;
-static constexpr int     PING_TIMEOUT_MS  = 800;
+static constexpr int     PING_TIMEOUT_MS       = 800;
+static constexpr unsigned long CANDIDATE_TIMEOUT_MS = 5000;
 
 // パケット識別子
 static constexpr uint8_t ID_CTRL[4] = {'s','i','n','1'};
@@ -181,6 +182,11 @@ static bool            ctrl_mac_set     = false;
 static uint8_t         recv_src_mac[6]  = {};
 static constexpr const char* CTRL_MAC_FILE = "/ctrl.mac";
 
+// ペアリング候補 (ENQ受信〜初回CTRL受信まで仮保持)
+static uint8_t         candidate_mac[6]  = {};
+static bool            candidate_pending = false;
+static unsigned long   candidate_ms      = 0;
+
 // --- ctrl_mac SPIFFS 永続化 ---
 static void loadCtrlMac() {
     if (!SPIFFS.exists(CTRL_MAC_FILE)) return;
@@ -243,19 +249,25 @@ static void onDataRecv(uint32_t length) {
     uint8_t myMac[6];
     esp_read_mac(myMac, ESP_MAC_WIFI_STA);
 
-    // ペアリング済みの場合、異なる送信元を拒否 (ENQ含む)
+    // ペアリング済みの場合、異なる送信元を全て拒否
     if (ctrl_mac_set && memcmp(recv_src_mac, ctrl_mac, 6) != 0) {
         if (matchId(recvBuf, ID_ENQ))
             Serial.println("[PAIR] ENQ rejected (already paired)");
         return;
     }
 
-    // ENQ → ACK 返信 + ctrl_mac 更新
+    // ENQ → 候補として一時保存し ACK を返す
+    //        ctrl_mac 確定は初回 CTRL 受信後 (3ウェイ確認)
     if (matchId(recvBuf, ID_ENQ) && length >= (uint32_t)PKT_MAC_LEN) {
         Serial.printf("[PAIR] ENQ from %02X:%02X:%02X:%02X:%02X:%02X\n",
             recv_src_mac[0],recv_src_mac[1],recv_src_mac[2],
             recv_src_mac[3],recv_src_mac[4],recv_src_mac[5]);
-        saveCtrlMac(recv_src_mac);
+        if (!ctrl_mac_set) {
+            memcpy(candidate_mac, recv_src_mac, 6);
+            candidate_pending = true;
+            candidate_ms = millis();
+            Serial.println("[PAIR] candidate set, waiting first CTRL");
+        }
         memcpy(pending_reply_pkt,     ID_ACK, 4);
         memcpy(pending_reply_pkt + 4, myMac,  6);
         pending_reply = true;
@@ -275,6 +287,13 @@ static void onDataRecv(uint32_t length) {
 
     // 制御パケット
     if (matchId(recvBuf, ID_CTRL) && length >= (uint32_t)PKT_CTRL_LEN) {
+        // 未ペアリング: 候補からの初回 CTRL で ctrl_mac を確定
+        if (!ctrl_mac_set) {
+            if (!candidate_pending || memcmp(recv_src_mac, candidate_mac, 6) != 0) return;
+            saveCtrlMac(candidate_mac);
+            candidate_pending = false;
+            Serial.println("[PAIR] ctrl_mac confirmed");
+        }
         sv_left      = (int)recvBuf[4] - SERVO_OFFSET;
         sv_right     = (int)recvBuf[5] - SERVO_OFFSET;
         uint8_t new_btn = recvBuf[6];
@@ -380,6 +399,13 @@ void loop() {
     // アーム状態マシン (エッジはrecvコールバックでラッチ済み)
     if (ok_edge) { ok_edge = false; sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
     if (ng_edge) { ng_edge = false; sv_ng_hold = !sv_ng_hold; }
+
+    // 候補タイムアウト: ENQ受信後に CTRL が来なければキャンセル
+    if (candidate_pending && millis() - candidate_ms > CANDIDATE_TIMEOUT_MS) {
+        Serial.println("[PAIR] candidate expired");
+        candidate_pending = false;
+    }
+
     bool cur_trg = recent && ((sv_btn >> 4) & 1);
 
     int arm_target;
@@ -514,8 +540,11 @@ static volatile bool  pending_reply = false;
 static uint8_t        pending_reply_pkt[PKT_MAC_LEN];
 
 // ---- Robot モード: ペアリング済みコントローラー MAC (再起動でリセット) ----
-static bool    robot_paired      = false;
-static uint8_t robot_ctrl_mac[6] = {};
+static bool          robot_paired             = false;
+static uint8_t       robot_ctrl_mac[6]        = {};
+static bool          robot_candidate_pending  = false;
+static uint8_t       robot_candidate_mac[6]   = {};
+static unsigned long robot_candidate_ms       = 0;
 
 // ---- M5Avatar (Robot モード) ----
 static Avatar avatar;
@@ -602,18 +631,23 @@ static void onDataRecv(uint32_t length) {
                 Serial.println("[PAIR] ENQ rejected (already paired)");
                 return;
             }
-            memcpy(robot_ctrl_mac, src, 6);
-            robot_paired = true;
-            radio.setTarget(robot_ctrl_mac);
-            Serial.printf("[PAIR] ENQ from %02X:%02X:%02X:%02X:%02X:%02X\n",
-                src[0],src[1],src[2],src[3],src[4],src[5]);
+            if (!robot_paired) {
+                memcpy(robot_candidate_mac, src, 6);
+                robot_candidate_pending = true;
+                robot_candidate_ms = millis();
+                Serial.printf("[PAIR] ENQ candidate %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    src[0],src[1],src[2],src[3],src[4],src[5]);
+            }
             memcpy(pending_reply_pkt,     ID_ACK, 4);
             memcpy(pending_reply_pkt + 4, myMac,  6);
             pending_reply = true;
             return;
         }
-        if (robot_paired && memcmp(recvBuf + 4, robot_ctrl_mac, 6) != 0) {
-            if (matchId(recvBuf, ID_PING)) return;  // 未ペアのPINGも拒否
+        // ペアリング済みなら異なるMAC由来の PING を拒否
+        if (robot_paired && matchId(recvBuf, ID_PING) &&
+                length >= (uint32_t)PKT_MAC_LEN &&
+                memcmp(recvBuf + 4, robot_ctrl_mac, 6) != 0) {
+            return;
         }
         if (matchId(recvBuf, ID_PING) && length >= (uint32_t)PKT_MAC_LEN) {
             uint8_t* src = recvBuf + 4;
@@ -625,6 +659,17 @@ static void onDataRecv(uint32_t length) {
             return;
         }
         if (matchId(recvBuf, ID_CTRL) && length >= (uint32_t)PKT_CTRL_LEN) {
+            // 未ペアリング: 候補がある場合のみ初回 CTRL で robot_ctrl_mac を確定
+            if (!robot_paired) {
+                if (!robot_candidate_pending) return;
+                memcpy(robot_ctrl_mac, robot_candidate_mac, 6);
+                robot_paired = true;
+                robot_candidate_pending = false;
+                radio.setTarget(robot_ctrl_mac);
+                Serial.printf("[PAIR] ctrl_mac confirmed %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    robot_ctrl_mac[0],robot_ctrl_mac[1],robot_ctrl_mac[2],
+                    robot_ctrl_mac[3],robot_ctrl_mac[4],robot_ctrl_mac[5]);
+            }
             sv_left = (int)recvBuf[4] - SERVO_OFFSET;
             sv_right = (int)recvBuf[5] - SERVO_OFFSET;
             uint8_t new_btn2 = recvBuf[6];
@@ -1011,6 +1056,12 @@ void loop() {
 
         if (sv_ok_edge) { sv_ok_edge = false; sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
         if (sv_ng_edge) { sv_ng_edge = false; sv_ng_hold = !sv_ng_hold; }
+
+        // 候補タイムアウト: ENQ受信後に CTRL が来なければキャンセル
+        if (robot_candidate_pending && millis() - robot_candidate_ms > CANDIDATE_TIMEOUT_MS) {
+            Serial.println("[PAIR] candidate expired");
+            robot_candidate_pending = false;
+        }
         bool cur_trg = recent && ((sv_btn >> 4) & 1);
 
         int arm_target;
