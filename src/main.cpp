@@ -451,17 +451,73 @@ void loop() {
 // ================================================================
 //  ROLE_CTRLR : atoms3r-ctrlr / atoms3-ctrlr
 //  動作モード (Aダブルクリックで切替・再起動):
-//    Mode::R_CON  右手持ちコントローラ — ADC + 制御送信 + 映像受信
-//    Mode::L_CON  左手持ちコントローラ — 同上 (反転)
-//    Mode::ROBOT  ロボット動作 — 制御受信 + サーボ駆動 + M5Avatar
+//    Mode::R_CON       右手持ちコントローラ — ADC + 制御送信 + 映像受信
+//    Mode::L_CON       左手持ちコントローラ — 同上 (反転)
+//    Mode::ROBOT       ロボット動作 — 制御受信 + サーボ駆動 + M5Avatar
+//    Mode::ROBOT_DISP  ロボット動作 + 映像受信表示 (HAS_CAMERA側コントローラと対になる)
 // ================================================================
 #ifdef ROLE_CTRLR
+
+// ----------------------------------------------------------------
+//  HAS_CAMERA : AtomS3R-CAM をコントローラとして使う場合のカメラ処理
+//  ROLE_ROBOT の initCamera() と同一実装 (別 #ifdef スコープのため複製)
+// ----------------------------------------------------------------
+#ifdef HAS_CAMERA
+static constexpr int CAM_POWER_PIN_C = 18;
+static constexpr int CAM_PIN_XCLK_C  = 21;
+static constexpr int CAM_PIN_SIOD_C  = 12;
+static constexpr int CAM_PIN_SIOC_C  = 9;
+static constexpr int CAM_PIN_VSYNC_C = 10;
+static constexpr int CAM_PIN_HREF_C  = 14;
+static constexpr int CAM_PIN_PCLK_C  = 40;
+static constexpr int CAM_PIN_Y9_C    = 13;
+static constexpr int CAM_PIN_Y8_C    = 11;
+static constexpr int CAM_PIN_Y7_C    = 17;
+static constexpr int CAM_PIN_Y6_C    = 4;
+static constexpr int CAM_PIN_Y5_C    = 48;
+static constexpr int CAM_PIN_Y4_C    = 46;
+static constexpr int CAM_PIN_Y3_C    = 42;
+static constexpr int CAM_PIN_Y2_C    = 3;
+
+static bool initCameraCtrlr() {
+    pinMode(CAM_POWER_PIN_C, OUTPUT);
+    digitalWrite(CAM_POWER_PIN_C, LOW);
+    delay(1500);
+    camera_config_t cfg = {};
+    cfg.pin_pwdn = -1; cfg.pin_reset = -1;
+    cfg.pin_xclk     = CAM_PIN_XCLK_C;
+    cfg.pin_sscb_sda = CAM_PIN_SIOD_C; cfg.pin_sscb_scl = CAM_PIN_SIOC_C;
+    cfg.pin_d7=CAM_PIN_Y9_C; cfg.pin_d6=CAM_PIN_Y8_C;
+    cfg.pin_d5=CAM_PIN_Y7_C; cfg.pin_d4=CAM_PIN_Y6_C;
+    cfg.pin_d3=CAM_PIN_Y5_C; cfg.pin_d2=CAM_PIN_Y4_C;
+    cfg.pin_d1=CAM_PIN_Y3_C; cfg.pin_d0=CAM_PIN_Y2_C;
+    cfg.pin_vsync    = CAM_PIN_VSYNC_C;
+    cfg.pin_href     = CAM_PIN_HREF_C;
+    cfg.pin_pclk     = CAM_PIN_PCLK_C;
+    cfg.xclk_freq_hz = 20000000;
+    cfg.ledc_timer   = LEDC_TIMER_0;
+    cfg.ledc_channel = LEDC_CHANNEL_0;
+    cfg.pixel_format = PIXFORMAT_RGB565;
+    cfg.frame_size   = FRAMESIZE_QQVGA;
+    cfg.jpeg_quality = 0;
+    cfg.fb_count     = 2;
+    cfg.fb_location  = CAMERA_FB_IN_PSRAM;
+    cfg.grab_mode    = CAMERA_GRAB_LATEST;
+    if (esp_camera_init(&cfg) != ESP_OK) {
+        Serial.println("[CAM] init failed"); return false;
+    }
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) { s->set_hmirror(s, 1); s->set_vflip(s, 1); }
+    Serial.println("[CAM] init OK");
+    return true;
+}
+#endif  // HAS_CAMERA
 
 #include <Avatar.h>
 using namespace m5avatar;
 
 // ---- 動作モード ----
-enum Mode : uint8_t { MODE_R_CON = 0, MODE_L_CON = 1, MODE_ROBOT = 2 };
+enum Mode : uint8_t { MODE_R_CON = 0, MODE_L_CON = 1, MODE_ROBOT = 2, MODE_ROBOT_DISP = 3 };
 static Mode current_mode = MODE_R_CON;
 
 ESPNowCam radio;
@@ -551,7 +607,7 @@ static Avatar avatar;
 
 // ----------------------------------------------------------------
 //  SPIFFS — param.ini (モード保存)
-//  文字: 'R'=R_CON  'L'=L_CON  'O'=rObot
+//  文字: 'R'=R_CON  'L'=L_CON  'O'=rObot  'D'=robot_Disp
 // ----------------------------------------------------------------
 static const char* PARAM_FILE = "/param.ini";
 
@@ -563,6 +619,7 @@ static void loadParam() {
     String line = f.readStringUntil('\n');
     f.close();
     if      (line.indexOf('L') >= 0) current_mode = MODE_L_CON;
+    else if (line.indexOf('D') >= 0) current_mode = MODE_ROBOT_DISP;
     else if (line.indexOf('O') >= 0) current_mode = MODE_ROBOT;
     Serial.printf("[PARAM] mode=%d\n", (int)current_mode);
 }
@@ -570,8 +627,9 @@ static void loadParam() {
 static void saveParam() {
     File f = SPIFFS.open(PARAM_FILE, FILE_WRITE);
     if (!f) { Serial.println("[PARAM] write failed"); return; }
-    char ch = (current_mode == MODE_L_CON) ? 'L'
-            : (current_mode == MODE_ROBOT)  ? 'O' : 'R';
+    char ch = (current_mode == MODE_L_CON)       ? 'L'
+            : (current_mode == MODE_ROBOT)        ? 'O'
+            : (current_mode == MODE_ROBOT_DISP)   ? 'D' : 'R';
     f.printf("mode=%c\n", ch);
     f.close();
     Serial.printf("[PARAM] saved mode=%d\n", (int)current_mode);
@@ -678,6 +736,72 @@ static void onDataRecv(uint32_t length) {
             if ((rising2 >> 2) & 1) sv_ng_edge = true;
             sv_btn_prev_cb = new_btn2;
             sv_btn     = new_btn2;
+            sv_recv_ms = millis();
+            Serial.printf("[CTRL] L=%+d R=%+d btn=0x%02X\n", sv_left, sv_right, sv_btn);
+        }
+        return;
+    }
+
+    // ROBOT_DISP モード: 映像フレーム受信表示 + 制御パケット受信 + ENQ/PING 応答
+    if (current_mode == MODE_ROBOT_DISP) {
+        if (length >= 2 && isJpeg(recvBuf)) {
+            frameLen      = length;
+            frameReady    = true;
+            last_frame_ms = millis();
+            return;
+        }
+        if (length < 4) return;
+        uint8_t myMac[6];
+        esp_read_mac(myMac, ESP_MAC_WIFI_STA);
+        if (matchId(recvBuf, ID_ENQ) && length >= (uint32_t)PKT_MAC_LEN) {
+            uint8_t* src = recvBuf + 4;
+            if (robot_paired && memcmp(src, robot_ctrl_mac, 6) != 0) {
+                Serial.println("[PAIR] ENQ rejected (already paired)");
+                return;
+            }
+            if (!robot_paired) {
+                memcpy(robot_candidate_mac, src, 6);
+                robot_candidate_pending = true;
+                robot_candidate_ms = millis();
+                Serial.printf("[PAIR] ENQ candidate %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    src[0],src[1],src[2],src[3],src[4],src[5]);
+            }
+            memcpy(pending_reply_pkt,     ID_ACK, 4);
+            memcpy(pending_reply_pkt + 4, myMac,  6);
+            pending_reply = true;
+            return;
+        }
+        if (robot_paired && matchId(recvBuf, ID_PING) &&
+                length >= (uint32_t)PKT_MAC_LEN &&
+                memcmp(recvBuf + 4, robot_ctrl_mac, 6) != 0) return;
+        if (matchId(recvBuf, ID_PING) && length >= (uint32_t)PKT_MAC_LEN) {
+            uint8_t* src = recvBuf + 4;
+            Serial.printf("[PING] from %02X:%02X:%02X:%02X:%02X:%02X\n",
+                src[0],src[1],src[2],src[3],src[4],src[5]);
+            memcpy(pending_reply_pkt,     ID_PONG, 4);
+            memcpy(pending_reply_pkt + 4, myMac,   6);
+            pending_reply = true;
+            return;
+        }
+        if (matchId(recvBuf, ID_CTRL) && length >= (uint32_t)PKT_CTRL_LEN) {
+            if (!robot_paired) {
+                if (!robot_candidate_pending) return;
+                memcpy(robot_ctrl_mac, robot_candidate_mac, 6);
+                robot_paired = true;
+                robot_candidate_pending = false;
+                radio.setTarget(robot_ctrl_mac);
+                Serial.printf("[PAIR] ctrl_mac confirmed %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    robot_ctrl_mac[0],robot_ctrl_mac[1],robot_ctrl_mac[2],
+                    robot_ctrl_mac[3],robot_ctrl_mac[4],robot_ctrl_mac[5]);
+            }
+            sv_left = (int)recvBuf[4] - SERVO_OFFSET;
+            sv_right = (int)recvBuf[5] - SERVO_OFFSET;
+            uint8_t new_btn = recvBuf[6];
+            uint8_t rising  = new_btn & ~sv_btn_prev_cb;
+            if ((rising >> 1) & 1) sv_ok_edge = true;
+            if ((rising >> 2) & 1) sv_ng_edge = true;
+            sv_btn_prev_cb = new_btn;
+            sv_btn     = new_btn;
             sv_recv_ms = millis();
             Serial.printf("[CTRL] L=%+d R=%+d btn=0x%02X\n", sv_left, sv_right, sv_btn);
         }
@@ -812,10 +936,22 @@ static void showRobotAnim() {
 }
 
 // Con モード: "R con" / "L con" マトリクスアニメーション + ステータスバー
+// HAS_CAMERA 時は "CamL " / "CamR " (シアン) を表示
 static void showConAnim() {
     M5.Display.fillScreen(TFT_BLACK);
+#ifdef HAS_CAMERA
+    draw_matrix_str(current_mode == MODE_L_CON ? "CamL  " : "CamR  ", MX_DELAY_MS, 0x00FFFF, 0);
+#else
     draw_matrix_str(current_mode == MODE_L_CON ? "L con " : "R con ", MX_DELAY_MS, MX_WHITE, 0);
+#endif
     drawStatusBar();
+}
+
+// ROBOT_DISP モード: "Disp " マトリクスアニメーション (シアン)
+static void showRobotDispAnim() {
+    M5.Display.setRotation(0);
+    M5.Display.fillScreen(TFT_BLACK);
+    draw_matrix_str("Disp  ", MX_DELAY_MS, 0x00FFFF, 0);
 }
 
 // ----------------------------------------------------------------
@@ -1001,6 +1137,15 @@ void setup() {
         avatar.setPosition(-56, -96);
         avatar.init();
         avatar.setExpression(Expression::Sleepy);
+    } else if (current_mode == MODE_ROBOT_DISP) {
+        // ---- ROBOT_DISP モード: サーボ駆動 + 映像受信表示 ----
+        initServo();
+        setServo(0, 0);
+        setArm(0);
+        Serial.println("Ready (robot+display mode)");
+        showRobotDispAnim();
+        setStatus("NO SIGNAL");
+        drawStatusBar();
     } else {
         // ---- Con モード (R / L) ----
         applyLrMode();
@@ -1010,11 +1155,15 @@ void setup() {
         pinMode(OK_SW_PIN,  INPUT_PULLUP);
         pinMode(NG_SW_PIN,  INPUT_PULLUP);
 
+#ifdef HAS_CAMERA
+        if (!initCameraCtrlr()) { while (true) delay(1000); }
+#endif
+
         loadMacList();
         if (macCount > 0) is_paired = resolveMac();
 
         if (is_paired) {
-            radio.setTarget(target_addr);  // 制御パケットをRobot宛ユニキャスト送信
+            radio.setTarget(target_addr);  // 制御パケット/映像をRobot宛ユニキャスト送信
             Serial.println("[MAC] P2P mode");
             setStatus("PAIRED");
         } else {
@@ -1038,9 +1187,15 @@ void setup() {
 void loop() {
     M5.update();
 
-    // Aダブルクリック → モード切替 (R→L→Robot→R...) → 再起動
+    // Aダブルクリック → モード切替 → 再起動
+    // HAS_CAMERA 時: R_CON ↔ L_CON のみ (カメラ機器のROBOT/ROBOT_DISPは無効)
+    // 通常時: R_CON → L_CON → ROBOT → ROBOT_DISP → R_CON
     if (M5.BtnA.wasDoubleClicked()) {
-        current_mode = (Mode)((current_mode + 1) % 3);
+#ifdef HAS_CAMERA
+        current_mode = (Mode)((current_mode + 1) % 2);
+#else
+        current_mode = (Mode)((current_mode + 1) % 4);
+#endif
         saveParam();
         esp_restart();
     }
@@ -1115,7 +1270,66 @@ void loop() {
         return;
     }
 
-    // ---- Con モード ----
+    // ---- ROBOT_DISP モード: サーボ駆動 + 映像受信表示 ----
+    if (current_mode == MODE_ROBOT_DISP) {
+        if (pending_reply) {
+            pending_reply = false;
+            radio.sendData(pending_reply_pkt, PKT_MAC_LEN);
+        }
+
+        bool recent = (millis() - sv_recv_ms) < (unsigned long)RECV_TIMEOUT_MS;
+
+        if (sv_ok_edge) { sv_ok_edge = false; sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
+        if (sv_ng_edge) { sv_ng_edge = false; sv_ng_hold = !sv_ng_hold; }
+
+        if (robot_candidate_pending && millis() - robot_candidate_ms > CANDIDATE_TIMEOUT_MS) {
+            Serial.println("[PAIR] candidate expired");
+            robot_candidate_pending = false;
+        }
+
+        bool cur_trg = recent && ((sv_btn >> 4) & 1);
+        int arm_target;
+        if (!recent)         arm_target = 0;
+        else if (cur_trg)    arm_target = SV_ARM_C;
+        else if (sv_ng_hold) arm_target = SV_ARM_NG;
+        else                 arm_target = sv_arm_mode_b ? SV_ARM_B : SV_ARM_A;
+
+        if (recent) {
+            sv_out_left  = sv_left;
+            sv_out_right = sv_right;
+            sv_out_arm   = arm_target;
+            sv_ease_ms   = millis();
+        } else {
+            sv_out_left  = 0;
+            sv_out_right = 0;
+            unsigned long now     = millis();
+            unsigned long elapsed = now - sv_ease_ms;
+            if (elapsed > 500) elapsed = 500;
+            int step = max(1, (int)((long)SV_EASE_DPS * (long)elapsed / 1000));
+            sv_ease_ms  = now;
+            sv_out_arm  = easeToward(sv_out_arm, 0, step);
+        }
+        setServo(sv_out_left, sv_out_right);
+        setArm(sv_out_arm);
+
+        // 映像タイムアウト監視
+        bool is_live_rd = (last_frame_ms != 0) && ((millis() - last_frame_ms) < FRAME_TIMEOUT_MS);
+        if (is_live_rd != was_live) {
+            setStatus(is_live_rd ? "ON AIR" : "NO SIGNAL");
+            if (!is_live_rd) drawStatusBar();
+            was_live = is_live_rd;
+        }
+
+        // 映像表示 + ステータスバー重ね描き
+        if (frameReady) {
+            frameReady = false;
+            M5.Display.drawJpg(recvBuf, frameLen, 0, 0, LCD_W, LCD_H, 0, 0, JPEG_DIV_NONE);
+            drawStatusBar();
+        }
+        return;
+    }
+
+    // ---- Con モード (R_CON / L_CON) ----
 
     // Aボタン長押し → ペアリング
     if (M5.BtnA.wasHold()) {
@@ -1123,6 +1337,20 @@ void loop() {
         showConAnim();
     }
 
+#ifdef HAS_CAMERA
+    // カメラフレームをキャプチャして robot(ROBOT_DISP) へ送信
+    {
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (fb) {
+            uint8_t* jpg = nullptr; size_t jpg_len = 0;
+            if (frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len)) {
+                radio.sendData(jpg, jpg_len);
+                free(jpg);
+            }
+            esp_camera_fb_return(fb);
+        }
+    }
+#else
     // 映像タイムアウト監視 → ON AIR / NO SIGNAL 切替
     bool is_live = (last_frame_ms != 0) &&
                    ((millis() - last_frame_ms) < FRAME_TIMEOUT_MS);
@@ -1142,6 +1370,7 @@ void loop() {
                            0, 0, JPEG_DIV_NONE);
         drawStatusBar();
     }
+#endif
 }
 
 #endif // ROLE_CTRLR
