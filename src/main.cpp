@@ -1143,6 +1143,14 @@ void setup() {
     SPIFFS.begin(true);
     loadParam();
 
+#ifdef CAM_COMBO
+    // 起動時 OK(G38) 判定: 押下中 → Controller(R_CON)、非押下 → Robot(ROBOT)
+    pinMode(OK_SW_PIN, INPUT_PULLUP);
+    delay(50);
+    current_mode = (digitalRead(OK_SW_PIN) == LOW) ? MODE_R_CON : MODE_ROBOT;
+    Serial.printf("[COMBO] boot as %s\n", current_mode == MODE_R_CON ? "Controller" : "Robot");
+#endif
+
     radio.setRecvBuffer(recvBuf);
     radio.setRecvCallback(onDataRecv);
     radio.setChannel(WIFI_CHANNEL);
@@ -1154,6 +1162,9 @@ void setup() {
         initServo();
         setServo(0, 0);
         setArm(0);
+#if defined(HAS_CAMERA) && defined(CAM_COMBO)
+        if (!initCameraCtrlr()) { while (true) delay(1000); }
+#endif
         Serial.println("Ready (robot mode)");
         showRobotAnim();
         M5.Display.setRotation(2);
@@ -1265,6 +1276,21 @@ void loop() {
         }
         setServo(sv_out_left, sv_out_right);
         setArm(sv_out_arm);
+
+#if defined(HAS_CAMERA) && defined(CAM_COMBO)
+        // CAM_COMBO Robot モード: カメラ映像をコントローラ側へ送信
+        {
+            camera_fb_t* fb = esp_camera_fb_get();
+            if (fb) {
+                uint8_t* jpg = nullptr; size_t jpg_len = 0;
+                if (frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len)) {
+                    radio.sendData(jpg, jpg_len);
+                    free(jpg);
+                }
+                esp_camera_fb_return(fb);
+            }
+        }
+#endif
 
         // アバター表情: 走行状態 + ボタンで決定
         {
