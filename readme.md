@@ -6,9 +6,9 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 
 ## 特徴 (Features)
 
-- **超小型FPVシステム**: [AtomS3R-CAM](https://ssci.to/9916) のカメラ映像を、手元のコントローラの [AtomS3R](https://ssci.to/9915) にリアルタイム表示。
+- **超小型FPVシステム**: [AtomS3R-CAM](https://ssci.to/9916) のカメラ映像を、手元のコントローラの [AtomS3R](https://ssci.to/9915) にリアルタイム表示。逆に AtomS3R-CAM をコントローラとして持ち、AtomS3R をロボット（映像表示）として使う構成も可能。
 - **ESP-NOWによる低遅延双方向通信**: Wi-Fiルーター不要で、起動してすぐにペアリング＆操縦が可能。ブロードキャストで1対多配信も可能。
-- **3モード切替**: コントローラ側は Aボタンダブルクリックで **右手持ち / 左手持ち / ロボット** をその場で切替。
+- **4モード切替**: コントローラ側は **右手持ち / 左手持ち / ロボット / 映像表示ロボット** の4モードに対応。
 - **M5Avatar表示**: カメラ無しのロボットモード時はアバターが走行状態に応じた表情を表示。
 - **スマートな配線管理**: [サーボ接続基板](https://ssci.to/11122)により煩わしい配線をスッキリ出来、コンパクトなロボットを構築できます。
 - **専用コントローラキット**: 指先に収まる[小型コントローラ(キット)](https://ssci.to/9521)を使えば、ジョイスティックとボタンによる直感的な操作が可能。（動画のコントローラーはキット品を改造してバッテリ内蔵したものです）
@@ -17,13 +17,25 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 
 ### システム構成
 
-| 名前 | 役割 | 対応マイコン |
-|------|------|--------|
-| カメラ付きロボット | 映像送信・サーボ駆動・ENQ/PING応答 | AtomS3R-CAM |
-| コントローラ | 映像受信・LCD表示・操作入力・制御送信 | AtomS3R / AtomS3 |
-| コントローラ（ロボットモード） | サーボ駆動・M5Avatar表示・ENQ/PING応答 | AtomS3R / AtomS3 |
+2つの構成パターンに対応しています。
 
-コントローラとカメラ無しロボットのプログラムが共通なので、Aボタンダブルクリックでその場で切替できます。
+#### パターン1: AtomS3R-CAM をロボット側に置く（標準構成）
+
+| 名前 | 役割 | ファームウェア |
+|------|------|--------|
+| カメラ付きロボット | 映像送信・サーボ駆動・ENQ/PING応答 | `AtomS3R-Cam`（`-DROLE_ROBOT`） |
+| コントローラ | 映像受信・LCD表示・操作入力・制御送信 | `AtomS3R` / `AtomS3` |
+
+コントローラ（`AtomS3R` / `AtomS3`）は Aボタンダブルクリックでモード切替できます。
+
+#### パターン2: AtomS3R-CAM をコントローラ側に置く（CAM-Ctrlr 構成）
+
+| 名前 | 役割 | ファームウェア |
+|------|------|--------|
+| カメラ付きコントローラ | 映像送信・操作入力・制御送信 | `AtomS3R-Cam-Ctrlr`（`-DROLE_CTRLR -DHAS_CAMERA`） |
+| 映像表示ロボット | 映像受信・LCD表示・サーボ駆動 | `AtomS3R`（MODE_ROBOT_DISP） |
+
+AtomS3R-CAM で撮影した映像が手元に表示され、AtomS3R 側がロボットとして駆動します。
 
 ### 部品表 (BOM)
 
@@ -40,15 +52,16 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 
 ## 開発・ビルド環境
 
-[PlatformIO](https://platformio.org/) を使用しています。`platformio.ini` で3つのビルドターゲットを定義しており、同一のソースコードをフラグで切り替えてロボット／コントローラどちらにも書き込めます。
+[PlatformIO](https://platformio.org/) を使用しています。`platformio.ini` で4つのビルドターゲットを定義しており、同一のソースコードをフラグで切り替えてロボット／コントローラどちらにも書き込めます。
 
-| ターゲット | 書き込み先 | フラグ |
-|-----------|-----------|--------|
-| `AtomS3R-Cam` | AtomS3R-CAM | `-DROLE_ROBOT` |
-| `AtomS3R` | AtomS3R | `-DROLE_CTRLR` |
-| `AtomS3` | AtomS3 | `-DROLE_CTRLR` |
+| ターゲット | 書き込み先 | フラグ | 役割 |
+|-----------|-----------|--------|------|
+| `AtomS3R-Cam` | AtomS3R-CAM | `-DROLE_ROBOT` | カメラ付きロボット |
+| `AtomS3R-Cam-Ctrlr` | AtomS3R-CAM | `-DROLE_CTRLR -DHAS_CAMERA` | カメラ付きコントローラ |
+| `AtomS3R` | AtomS3R | `-DROLE_CTRLR` | コントローラ / ロボット兼用 |
+| `AtomS3` | AtomS3 | `-DROLE_CTRLR` | コントローラ / ロボット兼用（PSRAM なし） |
 
-> AtomS3R と AtomS3 はコントローラ・ロボット両方として動作しますが、AtomS3 は PSRAM なしのためビルドターゲットを `AtomS3` に切り替えてください。
+> `AtomS3R` と `AtomS3` はコントローラ・ロボット両方として動作しますが、AtomS3 は PSRAM なしのためビルドターゲットを `AtomS3` に切り替えてください。
 
 ## 依存ライブラリ
 
@@ -56,17 +69,28 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 |-----------|-----------|------|
 | [M5Unified](https://github.com/m5stack/M5Unified) | `^0.2.2` | 全ターゲット |
 | [EspNowCam](https://github.com/hpsaturn/esp32-camera) | `^0.2.1` | 全ターゲット |
-| [m5stack-avatar](https://github.com/meganetaaan/m5stack-avatar) | `^0.9.0` | AtomS3R / AtomS3 のみ |
+| [m5stack-avatar](https://github.com/meganetaaan/m5stack-avatar) | `^0.9.0` | AtomS3R / AtomS3 / AtomS3R-Cam-Ctrlr |
 
 ## ピン配置
 
-### AtomS3R-Cam（ロボット）
+### AtomS3R-Cam（ロボット：`AtomS3R-Cam` env）
 
 | ピン | 用途 |
 |------|------|
 | G5 / LEDC CH1 | サーボ1（左車輪） |
 | G6 / LEDC CH2 | サーボ2（右車輪） |
 | G7 / LEDC CH3 | サーボ3（アーム） |
+
+### AtomS3R-Cam（コントローラ：`AtomS3R-Cam-Ctrlr` env）
+
+| ピン | 用途 |
+|------|------|
+| G8 | 可変抵抗 H軸（アナログ） |
+| G7 | 可変抵抗 V軸（アナログ） |
+| G5 | TRG（トリガー）ボタン |
+| G6 | ジョイスティック 押し込みボタン（短押し=モード切替 / 長押し=ペアリング） |
+| G38 | OK ボタン |
+| G39 | NG ボタン |
 
 ### AtomS3R / AtomS3（コントローラモード）
 
@@ -78,7 +102,7 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 | G38 | OK ボタン |
 | G39 | NG ボタン |
 
-### AtomS3R / AtomS3（Robotモード）
+### AtomS3R / AtomS3（Robot / Robot_Dispモード）
 
 コントローラ基板をロボットとして使用する場合、AtomS3R-Cam と同じサーボピンを使用。
 
@@ -90,32 +114,45 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 
 ## 動作モード（コントローラ側）
 
-Aボタンダブルクリックで3モードをサイクル切替し、自動再起動します。設定は `/param.ini` に保存されます。
+モード切替操作でサイクル切替し、自動再起動します。設定は `/param.ini` に保存されます。
 
-| モード | LCD | 動作 |
-|--------|-----|------|
-| **R con**（デフォルト） | カメラ映像 | 右手持ちコントローラ |
-| **L con** | カメラ映像（反転） | 左手持ち（映像・ジョイスティック180°反転） |
-| **Robot** | M5Avatar | サーボ駆動・ENQ/PING応答（カメラなしロボット） |
+| モード | LCD | 動作 | 対象ボード |
+|--------|-----|------|-----------|
+| **R con**（デフォルト） | カメラ映像 | 右手持ちコントローラ | AtomS3R / AtomS3 / AtomS3R-CAM |
+| **L con** | カメラ映像（反転） | 左手持ち（映像・ジョイスティック180°反転） | AtomS3R / AtomS3 / AtomS3R-CAM |
+| **Robot** | M5Avatar | サーボ駆動・ENQ/PING応答（カメラなしロボット） | AtomS3R / AtomS3 |
+| **Disp** | カメラ映像（受信） | 映像受信・LCD表示・サーボ駆動（CAM-Ctrlr からの映像を表示） | AtomS3R / AtomS3 |
+
+`AtomS3R` / `AtomS3` では Aボタンダブルクリックで切替。`AtomS3R-CAM`（Ctrlr）では G6 スティック短押しで R con ↔ L con を切替。
 
 ## ボタン操作
 
-### コントローラモード（R con / L con）
+### AtomS3R / AtomS3 — コントローラモード（R con / L con）
 
 | 操作 | 機能 |
 |------|------|
-| Aボタン ダブルクリック | モード切替（R con → L con → Robot → …） |
+| Aボタン ダブルクリック | モード切替（R con → L con → Robot → Disp → …） |
 | Aボタン 長押し | ペアリング（ENQ送信） |
 | TRGボタン 押下中 | アーム → 角度C（-10°） |
 | OKボタン 1回押し | アーム規定位置 A（-70°）↔ B（-55°）トグル |
 | NGボタン 1回押し | アーム NG（+70°）保持トグル（再押しでA/Bへ戻る） |
 
-### Robotモード
+### AtomS3R / AtomS3 — Robot / Disp モード
 
 | 操作 | 機能 |
 |------|------|
 | Aボタン ダブルクリック | モード切替（R con へ戻る） |
 | コントローラからの制御パケット | サーボ駆動（コントローラのボタン操作がそのまま反映） |
+
+### AtomS3R-CAM（Ctrlr）— コントローラモード（R con / L con）
+
+| 操作 | 機能 |
+|------|------|
+| G6 スティック 短押し | モード切替（R con ↔ L con） |
+| G6 スティック 長押し（1.5 秒以上） | ペアリング（ENQ送信） |
+| TRGボタン 押下中 | アーム → 角度C（-10°） |
+| OKボタン 1回押し | アーム規定位置 A（-70°）↔ B（-55°）トグル |
+| NGボタン 1回押し | アーム NG（+70°）保持トグル（再押しでA/Bへ戻る） |
 
 ## アーム制御
 
