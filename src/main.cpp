@@ -605,6 +605,30 @@ static unsigned long robot_candidate_ms       = 0;
 // ---- M5Avatar (Robot モード) ----
 static Avatar avatar;
 
+// ---- HAS_CAMERA: G6スティック押込みボタン (BtnA代替) ----
+// 短押し(<1500ms) → R↔L切替、長押し(>=1500ms) → ペアリング
+#ifdef HAS_CAMERA
+static constexpr int     SW_STICK_PIN    = 6;
+static constexpr unsigned long STICK_LONG_MS = 1500;
+static unsigned long     stick_press_ms  = 0;
+static bool              stick_was_low   = false;
+
+// 戻り値: 0=何もなし 1=短押し 2=長押し
+static int updateStickButton() {
+    bool low = !digitalRead(SW_STICK_PIN);
+    if (low && !stick_was_low) {
+        stick_press_ms = millis();
+        stick_was_low  = true;
+    } else if (!low && stick_was_low) {
+        unsigned long dur = millis() - stick_press_ms;
+        stick_was_low = false;
+        if (dur >= 50 && dur < STICK_LONG_MS) return 1;
+        if (dur >= STICK_LONG_MS)             return 2;
+    }
+    return 0;
+}
+#endif  // HAS_CAMERA
+
 // ----------------------------------------------------------------
 //  SPIFFS — param.ini (モード保存)
 //  文字: 'R'=R_CON  'L'=L_CON  'O'=rObot  'D'=robot_Disp
@@ -1156,6 +1180,7 @@ void setup() {
         pinMode(NG_SW_PIN,  INPUT_PULLUP);
 
 #ifdef HAS_CAMERA
+        pinMode(SW_STICK_PIN, INPUT_PULLUP);
         if (!initCameraCtrlr()) { while (true) delay(1000); }
 #endif
 
@@ -1188,17 +1213,15 @@ void loop() {
     M5.update();
 
     // Aダブルクリック → モード切替 → 再起動
-    // HAS_CAMERA 時: R_CON ↔ L_CON のみ (カメラ機器のROBOT/ROBOT_DISPは無効)
+    // HAS_CAMERA 時: BtnA なし。G6短押しで CON mode section にて処理
     // 通常時: R_CON → L_CON → ROBOT → ROBOT_DISP → R_CON
+#ifndef HAS_CAMERA
     if (M5.BtnA.wasDoubleClicked()) {
-#ifdef HAS_CAMERA
-        current_mode = (Mode)((current_mode + 1) % 2);
-#else
         current_mode = (Mode)((current_mode + 1) % 4);
-#endif
         saveParam();
         esp_restart();
     }
+#endif
 
     if (current_mode == MODE_ROBOT) {
         // ---- Robot モード ----
@@ -1331,11 +1354,27 @@ void loop() {
 
     // ---- Con モード (R_CON / L_CON) ----
 
-    // Aボタン長押し → ペアリング
+    // ペアリング / モード切替 操作
+    // HAS_CAMERA: G6短押し→R↔L切替、G6長押し(1.5秒)→ペアリング
+    // 通常:       Aボタン長押し→ペアリング
+#ifdef HAS_CAMERA
+    {
+        int stick = updateStickButton();
+        if (stick == 1) {
+            current_mode = (Mode)(1 - (int)current_mode);  // R_CON ↔ L_CON
+            saveParam();
+            esp_restart();
+        } else if (stick == 2) {
+            doPairing();
+            showConAnim();
+        }
+    }
+#else
     if (M5.BtnA.wasHold()) {
         doPairing();
         showConAnim();
     }
+#endif
 
 #ifdef HAS_CAMERA
     // カメラフレームをキャプチャして robot(ROBOT_DISP) へ送信
