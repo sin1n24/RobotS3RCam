@@ -32,10 +32,10 @@ AtomS3R-CAM + AtomS3R（または AtomS3）による ESP-NOW ワイヤレスカ�
 
 | 名前 | 役割 | ファームウェア |
 |------|------|--------|
-| カメラ付きコントローラ | 映像送信・操作入力・制御送信 | `AtomS3R-Cam-Ctrlr`（`-DROLE_CTRLR -DHAS_CAMERA`） |
-| 映像表示ロボット | 映像受信・LCD表示・サーボ駆動 | `AtomS3R`（MODE_ROBOT_DISP） |
+| カメラ付きコントローラ | 映像送信・操作入力・制御送信 | `AtomS3R-Cam`（コントローラ基板に挿すと自動でコントローラ動作） |
+| 映像表示ロボット | 映像受信・LCD表示・サーボ駆動 | `AtomS3R`（Disp モード） |
 
-AtomS3R-CAM で撮影した映像が手元に表示され、AtomS3R 側がロボットとして駆動します。
+AtomS3R-CAM で撮影した映像が手元に表示され、AtomS3R 側がロボット（Disp）として駆動します。AtomS3R-CAM には標準構成と同じ `AtomS3R-Cam` を焼けばよく、起動時の基板自動判別でコントローラとして動作します（旧 `AtomS3R-Cam-Ctrlr` env は不要）。
 
 ### 部品表 (BOM)
 
@@ -56,12 +56,13 @@ AtomS3R-CAM で撮影した映像が手元に表示され、AtomS3R 側がロボ
 
 | ターゲット | 書き込み先 | フラグ | 役割 |
 |-----------|-----------|--------|------|
-| `AtomS3R-Cam` | AtomS3R-CAM | `-DROLE_ROBOT` | カメラ付きロボット |
-| `AtomS3R-Cam-Ctrlr` | AtomS3R-CAM | `-DROLE_CTRLR -DHAS_CAMERA` | カメラ付きコントローラ |
+| `AtomS3R-Cam` | AtomS3R-CAM | `-DROLE_ROBOT` | カメラ付きロボット／カメラ付きコントローラ（基板自動判別） |
 | `AtomS3R` | AtomS3R | `-DROLE_CTRLR` | コントローラ / ロボット兼用 |
 | `AtomS3` | AtomS3 | `-DROLE_CTRLR` | コントローラ / ロボット兼用（PSRAM なし） |
 
-> `AtomS3R` と `AtomS3` はコントローラ・ロボット両方として動作しますが、AtomS3 は PSRAM なしのためビルドターゲットを `AtomS3` に切り替えてください。
+> `AtomS3R-Cam` は起動時に G7 の可変抵抗（コントローラ基板）の有無を読み、ロボット／コントローラを自動判別します。1つの env でどちらにも使えるため、旧 `AtomS3R-Cam-Ctrlr`（`-DROLE_CTRLR -DHAS_CAMERA`）は不要になりました（`platformio.ini` には残してありますが、M5.begin と カメラ SCCB の I2C 競合で使えません）。
+>
+> `AtomS3R` と `AtomS3` はコントローラ・ロボット両方として動作しますが、AtomS3 は PSRAM なしのためビルドターゲットを `AtomS3` に切り替えてください。こちらも起動時の基板自動判別で、コントローラ基板なら R con / L con、ロボット配線なら Robot / Disp のみに切替モードを限定します。
 
 ## 依存ライブラリ
 
@@ -121,9 +122,11 @@ AtomS3R-CAM で撮影した映像が手元に表示され、AtomS3R 側がロボ
 | **R con**（デフォルト） | カメラ映像 | 右手持ちコントローラ | AtomS3R / AtomS3 / AtomS3R-CAM |
 | **L con** | カメラ映像（反転） | 左手持ち（映像・ジョイスティック180°反転） | AtomS3R / AtomS3 / AtomS3R-CAM |
 | **Robot** | M5Avatar | サーボ駆動・ENQ/PING応答（カメラなしロボット） | AtomS3R / AtomS3 |
-| **Disp** | カメラ映像（受信） | 映像受信・LCD表示・サーボ駆動（CAM-Ctrlr からの映像を表示） | AtomS3R / AtomS3 |
+| **Disp** | カメラ映像（受信） | 映像受信・LCD表示・サーボ駆動（カメラ付きコントローラからの映像を表示） | AtomS3R / AtomS3 |
 
-`AtomS3R` / `AtomS3` では Aボタンダブルクリックで切替。`AtomS3R-CAM`（Ctrlr）では G6 スティック短押しで R con ↔ L con を切替。
+`AtomS3R` / `AtomS3` では Aボタンダブルクリックで切替（基板自動判別により、コントローラ基板なら R con ↔ L con、ロボット配線なら Robot ↔ Disp）。`AtomS3R-CAM` をコントローラとして使う場合は G6 スティック短押しで R con ↔ L con を切替。
+
+> Disp モードでは装着の向きの都合上、画面下部のステータス文字（黒帯）のみ180°回転して表示します（映像の向きは変えません）。
 
 ## ボタン操作
 

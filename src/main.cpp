@@ -74,7 +74,7 @@ static constexpr int     CTRL_INTERVAL_US = 20 * 1000;
 static constexpr int     RECV_TIMEOUT_MS  = 300;
 static constexpr int     MAC_LIST_MAX     = 5;
 static constexpr int     PING_TIMEOUT_MS       = 800;
-static constexpr unsigned long CANDIDATE_TIMEOUT_MS = 5000;
+static constexpr unsigned long CANDIDATE_TIMEOUT_MS = 8000;
 
 // パケット識別子
 static constexpr uint8_t ID_CTRL[4] = {'s','i','n','1'};
@@ -187,6 +187,71 @@ static uint8_t         candidate_mac[6]  = {};
 static bool            candidate_pending = false;
 static unsigned long   candidate_ms      = 0;
 
+// ================================================================
+//  自動判別 (コントローラ基板の有無を起動時ADCで判定)
+//   基板装着 → G7(ADC_V)≈2000 → コントローラ動作
+//   基板なし → G7(ADC_V)≈0    → ロボット動作
+// ================================================================
+static bool is_controller = false;
+
+// コントローラ動作時のピン (サーボピンと一部共用: 判別後に用途確定)
+static constexpr int CTL_ADC_H_PIN = 8;   // 可変抵抗 H軸
+static constexpr int CTL_ADC_V_PIN = 7;   // 可変抵抗 V軸 (=サーボ3 G7 と共用)
+static constexpr int CTL_TRG_PIN   = 5;   // TRG (=サーボ1 G5 と共用)
+static constexpr int CTL_OK_PIN    = 38;  // OK ボタン
+static constexpr int CTL_NG_PIN    = 39;  // NG ボタン
+static constexpr int CTL_ROLE_THRESH = 1000;  // 判別閾値
+
+// コントローラ動作時のジョイスティック移動平均
+static float ctl_h_log[LOG_SIZE] = {};
+static float ctl_v_log[LOG_SIZE] = {};
+static int   ctl_log_cnt = 0;
+static float ctl_joy_h = 0.0f;
+static float ctl_joy_v = 0.0f;
+
+// コントローラ動作のペアリング状態 (ACK受信で確定 → ユニキャスト化, ENQ停止)
+static bool    ctl_paired = false;
+static uint8_t ctl_target_mac[6] = {};
+
+// 起動時に G7(ADC_V) を読んでコントローラ基板の有無を判定
+static bool detectController() {
+    pinMode(CTL_ADC_V_PIN, ANALOG);
+    delay(10);
+    long sum = 0;
+    for (int i = 0; i < 10; i++) { sum += analogRead(CTL_ADC_V_PIN); delay(5); }
+    int avg = (int)(sum / 10);
+    bool ctrl = (avg >= CTL_ROLE_THRESH);
+    Serial.printf("[DETECT] G7(ADC_V) avg=%d -> %s\n", avg, ctrl ? "CONTROLLER" : "ROBOT");
+    return ctrl;
+}
+
+// コントローラ動作: ADC読み + 制御パケット送信
+static void ctlReadADC() {
+    ctl_h_log[ctl_log_cnt] = (1.0f - 2.0f * analogRead(CTL_ADC_H_PIN) / ADC_MAX_VALUE);
+    ctl_v_log[ctl_log_cnt] = (1.0f - 2.0f * analogRead(CTL_ADC_V_PIN) / ADC_MAX_VALUE);
+    if (++ctl_log_cnt >= LOG_SIZE) ctl_log_cnt = 0;
+    float sh = 0, sv = 0;
+    for (int i = 0; i < LOG_SIZE; i++) { sh += ctl_h_log[i]; sv += ctl_v_log[i]; }
+    ctl_joy_h = deadbanded(sh / LOG_SIZE, DEADBAND);
+    ctl_joy_v = deadbanded(sv / LOG_SIZE, DEADBAND);
+}
+
+static void ctlSendCtrlPacket() {
+    int left  = constrain(-(int)(MAX_SPEED * (-ctl_joy_v - ctl_joy_h)), -90, 90);
+    int right = constrain( (int)(MAX_SPEED * (-ctl_joy_v + ctl_joy_h)), -90, 90);
+    uint8_t btn = 0;
+    if (!digitalRead(CTL_OK_PIN))  btn |= (1 << 1);
+    if (!digitalRead(CTL_NG_PIN))  btn |= (1 << 2);
+    if (!digitalRead(CTL_TRG_PIN)) btn |= (1 << 4);
+    uint8_t pkt[PKT_CTRL_LEN] = {
+        ID_CTRL[0], ID_CTRL[1], ID_CTRL[2], ID_CTRL[3],
+        (uint8_t)(left  + SERVO_OFFSET),
+        (uint8_t)(right + SERVO_OFFSET),
+        btn
+    };
+    radio.sendData(pkt, PKT_CTRL_LEN);
+}
+
 // --- ctrl_mac SPIFFS 永続化 ---
 static void loadCtrlMac() {
     if (!SPIFFS.exists(CTRL_MAC_FILE)) return;
@@ -241,6 +306,19 @@ static int easeToward(int cur, int target, int step) {
 
 // --- ESPNowCam 受信コールバック ---
 static void onDataRecv(uint32_t length) {
+    if (is_controller) {
+        // コントローラ動作: ACK受信でペア確定 → 宛先をロボットにユニキャスト化
+        // (確定後は loop が ENQ ブロードキャストを停止する)
+        if (!ctl_paired && length >= (uint32_t)PKT_MAC_LEN && matchId(recvBuf, ID_ACK)) {
+            memcpy(ctl_target_mac, recvBuf + 4, 6);  // ACK内のロボット(Disp)MAC
+            radio.setTarget(ctl_target_mac);
+            ctl_paired = true;
+            Serial.printf("[CTL] paired -> %02X:%02X:%02X:%02X:%02X:%02X (unicast)\n",
+                ctl_target_mac[0],ctl_target_mac[1],ctl_target_mac[2],
+                ctl_target_mac[3],ctl_target_mac[4],ctl_target_mac[5]);
+        }
+        return;
+    }
     if (length < 4) return;
 
     // 映像フレームは無視 (robot は受信しない)
@@ -350,10 +428,8 @@ void setup() {
 
     if (!initCamera()) { while (true) delay(1000); }
 
-    loadCtrlMac();
-    initServo();
-    setServo(0, 0);
-    setArm(0);
+    // コントローラ基板の有無を ADC(G7) で自動判別
+    is_controller = detectController();
 
     // ESPNowCam 初期化
     radio.setRecvBuffer(recvBuf);
@@ -384,10 +460,59 @@ void setup() {
         }
     );
     Serial.println("[RADIO] init OK");
-    Serial.println("Ready");
+
+    if (is_controller) {
+        // ---- コントローラ動作: ジョイスティック + ボタン読み取り ----
+        pinMode(CTL_ADC_H_PIN, ANALOG);
+        pinMode(CTL_ADC_V_PIN, ANALOG);
+        pinMode(CTL_TRG_PIN, INPUT_PULLUP);
+        pinMode(CTL_OK_PIN,  INPUT_PULLUP);
+        pinMode(CTL_NG_PIN,  INPUT_PULLUP);
+        Serial.println("Ready (CONTROLLER mode)");
+    } else {
+        // ---- ロボット動作: サーボ駆動 + 制御受信 ----
+        loadCtrlMac();
+        initServo();
+        setServo(0, 0);
+        setArm(0);
+        Serial.println("Ready (ROBOT mode)");
+    }
 }
 
 void loop() {
+    // ================= コントローラ動作 =================
+    if (is_controller) {
+        // 自動ペアリング: ペア確定までENQをブロードキャスト送信
+        // (相手 AtomS3R Disp 側が ENQ→候補→初回CTRL で確定 → ACK返信 → ctl_paired)
+        // 確定後はブロードキャストを止め、CTRL/映像をユニキャスト送信する
+        if (!ctl_paired) {
+            static unsigned long enq_ms = 0;
+            if (millis() - enq_ms > 500) {
+                enq_ms = millis();
+                uint8_t myMac[6];
+                esp_read_mac(myMac, ESP_MAC_WIFI_STA);
+                uint8_t pkt[PKT_MAC_LEN];
+                memcpy(pkt,     ID_ENQ, 4);
+                memcpy(pkt + 4, myMac,  6);
+                radio.sendData(pkt, PKT_MAC_LEN);  // target未設定=ブロードキャスト
+            }
+        }
+        ctlReadADC();
+        ctlSendCtrlPacket();
+        // カメラ映像をロボット側へ送信
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (fb) {
+            uint8_t* jpg = nullptr; size_t jpg_len = 0;
+            if (frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len)) {
+                radio.sendData(jpg, jpg_len);
+                free(jpg);
+            }
+            esp_camera_fb_return(fb);
+        }
+        return;
+    }
+
+    // ================= ロボット動作 =================
     // ACK / PONG の deferred 送信 (recv CB 内から esp_now_send 禁止のため)
     if (pending_reply) {
         pending_reply = false;
@@ -520,6 +645,12 @@ using namespace m5avatar;
 enum Mode : uint8_t { MODE_R_CON = 0, MODE_L_CON = 1, MODE_ROBOT = 2, MODE_ROBOT_DISP = 3 };
 static Mode current_mode = MODE_R_CON;
 
+// 基板自動判別: 起動時 G7(ADC_V) で判定
+//   true  = コントローラ基板装着 (R_Con/L_Con のみ許可)
+//   false = ロボット配線        (Robot/Disp  のみ許可)
+static bool board_is_controller = true;
+static constexpr int BOARD_ROLE_THRESH = 1000;
+
 ESPNowCam radio;
 
 static constexpr int LCD_W = 128;
@@ -595,12 +726,41 @@ static constexpr int  SV_EASE_DPS  = 90;
 static volatile bool  pending_reply = false;
 static uint8_t        pending_reply_pkt[PKT_MAC_LEN];
 
-// ---- Robot モード: ペアリング済みコントローラー MAC (再起動でリセット) ----
+// ---- Robot/ROBOT_DISP モード: ペアリング済みコントローラー MAC ----
 static bool          robot_paired             = false;
 static uint8_t       robot_ctrl_mac[6]        = {};
 static bool          robot_candidate_pending  = false;
 static uint8_t       robot_candidate_mac[6]   = {};
 static unsigned long robot_candidate_ms       = 0;
+
+// ROBOT_DISP 専用: ctrl.mac 永続化 (再起動をまたいでペアリング維持)
+static const char*   DISP_CTRL_FILE = "/ctrl.mac";
+static volatile bool disp_paired_event = false;  // ペアリング確定→loopで表示
+
+#ifdef HAS_CAMERA
+static bool cam_ok = false;  // カメラ初期化成功フラグ (失敗時は制御のみ継続)
+#endif
+
+static void loadDispCtrlMac() {
+    if (!SPIFFS.exists(DISP_CTRL_FILE)) return;
+    File f = SPIFFS.open(DISP_CTRL_FILE, FILE_READ);
+    if (!f || f.size() < 6) { if (f) f.close(); return; }
+    for (int i = 0; i < 6; i++) robot_ctrl_mac[i] = (uint8_t)f.read();
+    f.close();
+    robot_paired = true;
+    radio.setTarget(robot_ctrl_mac);
+    Serial.printf("[DISP] ctrl_mac %02X:%02X:%02X:%02X:%02X:%02X loaded\n",
+        robot_ctrl_mac[0],robot_ctrl_mac[1],robot_ctrl_mac[2],
+        robot_ctrl_mac[3],robot_ctrl_mac[4],robot_ctrl_mac[5]);
+}
+
+static void saveDispCtrlMac() {
+    File f = SPIFFS.open(DISP_CTRL_FILE, FILE_WRITE);
+    if (!f) return;
+    for (int i = 0; i < 6; i++) f.write(robot_ctrl_mac[i]);
+    f.close();
+    Serial.println("[DISP] ctrl_mac saved");
+}
 
 // ---- M5Avatar (Robot モード) ----
 static Avatar avatar;
@@ -808,6 +968,8 @@ static void onDataRecv(uint32_t length) {
             return;
         }
         if (matchId(recvBuf, ID_CTRL) && length >= (uint32_t)PKT_CTRL_LEN) {
+            // 未ペアリング: ENQで候補登録済みの相手の初回CTRLでのみ ctrl_mac 確定
+            // (候補なしのブロードキャストCTRLは破棄 = クロスペアリング防止)
             if (!robot_paired) {
                 if (!robot_candidate_pending) return;
                 memcpy(robot_ctrl_mac, robot_candidate_mac, 6);
@@ -817,6 +979,8 @@ static void onDataRecv(uint32_t length) {
                 Serial.printf("[PAIR] ctrl_mac confirmed %02X:%02X:%02X:%02X:%02X:%02X\n",
                     robot_ctrl_mac[0],robot_ctrl_mac[1],robot_ctrl_mac[2],
                     robot_ctrl_mac[3],robot_ctrl_mac[4],robot_ctrl_mac[5]);
+                saveDispCtrlMac();
+                disp_paired_event = true;  // loop で「PAIRED!」表示
             }
             sv_left = (int)recvBuf[4] - SERVO_OFFSET;
             sv_right = (int)recvBuf[5] - SERVO_OFFSET;
@@ -865,6 +1029,19 @@ static void setStatus(const char* msg) {
 
 static void drawStatusBar() {
     if (last_status[0] == '\0') return;
+    if (current_mode == MODE_ROBOT_DISP) {
+        // Disp は逆さ装着のため、文字(黒帯)だけ180度回転して表示 (映像はそのまま)
+        static M5Canvas sb(&M5.Display);
+        static bool sb_init = false;
+        if (!sb_init) { sb.createSprite(LCD_W, 10); sb_init = true; }
+        sb.fillScreen(TFT_BLACK);
+        sb.setTextColor(TFT_WHITE, TFT_BLACK);
+        sb.setTextSize(1);
+        sb.setCursor(2, 1);
+        sb.print(last_status);
+        sb.pushRotateZoom(LCD_W / 2.0f, LCD_H - 5.0f, 180.0f, 1.0f, 1.0f);
+        return;
+    }
     M5.Display.fillRect(0, LCD_H - 10, LCD_W, 10, TFT_BLACK);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.setTextSize(1);
@@ -1010,6 +1187,21 @@ static int easeToward(int cur, int target, int step) {
 }
 
 // ----------------------------------------------------------------
+//  基板自動判別: 起動時に G7(ADC_V) を読み、コントローラ基板の有無を判定
+//   基板装着 → G7≈2000、ロボット配線 → G7≈0
+// ----------------------------------------------------------------
+static bool detectBoardRole() {
+    pinMode(ADC_V_PIN, ANALOG);
+    delay(10);
+    long sum = 0;
+    for (int i = 0; i < 10; i++) { sum += analogRead(ADC_V_PIN); delay(5); }
+    int avg = (int)(sum / 10);
+    bool ctrl = (avg >= BOARD_ROLE_THRESH);
+    Serial.printf("[DETECT] G7(ADC_V) avg=%d -> %s board\n", avg, ctrl ? "CONTROLLER" : "ROBOT");
+    return ctrl;
+}
+
+// ----------------------------------------------------------------
 //  Con モード: ADC + 制御パケット送信
 // ----------------------------------------------------------------
 static void readADC() {
@@ -1135,13 +1327,37 @@ static void doPairing() {
 //  setup / loop
 // ----------------------------------------------------------------
 void setup() {
+    Serial.begin(115200);
+#ifdef HAS_CAMERA
+    // カメラを M5.begin (I2C初期化) より前に初期化し、SCCB用I2Cを先に確保
+    // (M5Unifiedが先にI2Cを取ると camera probe が競合して失敗するため)
+    cam_ok = initCameraCtrlr();
+    if (!cam_ok) Serial.println("[CAM] disabled - control only");
+#endif
     auto cfg = M5.config();
     M5.begin(cfg);
-    Serial.begin(115200);
     Serial.println("=== atoms3r-ctrlr (STEP2) ===");
 
     SPIFFS.begin(true);
     loadParam();
+
+#ifndef HAS_CAMERA
+    // コントローラ基板 / ロボット配線 を自動判別し、無効なモードを矯正
+    //   基板装着 → R_Con/L_Con のみ (Robot/Disp をスキップ)
+    //   ロボット配線 → Robot/Disp のみ (R_Con/L_Con をスキップ)
+    board_is_controller = detectBoardRole();
+    if (board_is_controller) {
+        if (current_mode == MODE_ROBOT || current_mode == MODE_ROBOT_DISP) {
+            current_mode = MODE_R_CON;
+            Serial.println("[DETECT] forced R_CON (controller board)");
+        }
+    } else {
+        if (current_mode == MODE_R_CON || current_mode == MODE_L_CON) {
+            current_mode = MODE_ROBOT;
+            Serial.println("[DETECT] forced ROBOT (robot wiring)");
+        }
+    }
+#endif
 
     radio.setRecvBuffer(recvBuf);
     radio.setRecvCallback(onDataRecv);
@@ -1166,6 +1382,7 @@ void setup() {
         initServo();
         setServo(0, 0);
         setArm(0);
+        loadDispCtrlMac();
         Serial.println("Ready (robot+display mode)");
         showRobotDispAnim();
         setStatus("NO SIGNAL");
@@ -1181,7 +1398,7 @@ void setup() {
 
 #ifdef HAS_CAMERA
         pinMode(SW_STICK_PIN, INPUT_PULLUP);
-        if (!initCameraCtrlr()) { while (true) delay(1000); }
+        // カメラ初期化は setup 冒頭 (M5.begin前) で実施済み
 #endif
 
         loadMacList();
@@ -1194,7 +1411,11 @@ void setup() {
         } else {
             memcpy(target_addr, BROADCAST_ADDR, 6);
             Serial.println("[MAC] broadcast mode");
+#ifdef HAS_CAMERA
+            setStatus("NO PAIR LongG6:pair");
+#else
             setStatus("NO PAIR  Hold A:pair");
+#endif
         }
 
         esp_timer_handle_t t;
@@ -1213,11 +1434,15 @@ void loop() {
     M5.update();
 
     // Aダブルクリック → モード切替 → 再起動
-    // HAS_CAMERA 時: BtnA なし。G6短押しで CON mode section にて処理
-    // 通常時: R_CON → L_CON → ROBOT → ROBOT_DISP → R_CON
+    // 基板判別で許可モードを限定:
+    //   コントローラ基板 → R_Con ↔ L_Con
+    //   ロボット配線     → Robot ↔ Disp
 #ifndef HAS_CAMERA
     if (M5.BtnA.wasDoubleClicked()) {
-        current_mode = (Mode)((current_mode + 1) % 4);
+        if (board_is_controller)
+            current_mode = (current_mode == MODE_R_CON) ? MODE_L_CON : MODE_R_CON;
+        else
+            current_mode = (current_mode == MODE_ROBOT) ? MODE_ROBOT_DISP : MODE_ROBOT;
         saveParam();
         esp_restart();
     }
@@ -1300,6 +1525,22 @@ void loop() {
             radio.sendData(pending_reply_pkt, PKT_MAC_LEN);
         }
 
+        // ペアリング確定 → 緑画面 "PAIRED!" を1秒表示
+        if (disp_paired_event) {
+            disp_paired_event = false;
+            M5.Display.fillScreen(TFT_GREEN);
+            M5.Display.setTextColor(TFT_BLACK, TFT_GREEN);
+            M5.Display.setTextSize(2);
+            M5.Display.setCursor(8, 50);
+            M5.Display.println("PAIRED!");
+            delay(1000);
+            M5.Display.fillScreen(TFT_BLACK);
+            M5.Display.setTextSize(1);
+            setStatus("PAIRED");
+            drawStatusBar();
+            was_live = false;  // 映像ステータスを再判定させる
+        }
+
         bool recent = (millis() - sv_recv_ms) < (unsigned long)RECV_TIMEOUT_MS;
 
         if (sv_ok_edge) { sv_ok_edge = false; sv_arm_mode_b = !sv_arm_mode_b; sv_ng_hold = false; }
@@ -1378,7 +1619,7 @@ void loop() {
 
 #ifdef HAS_CAMERA
     // カメラフレームをキャプチャして robot(ROBOT_DISP) へ送信
-    {
+    if (cam_ok) {
         camera_fb_t* fb = esp_camera_fb_get();
         if (fb) {
             uint8_t* jpg = nullptr; size_t jpg_len = 0;
